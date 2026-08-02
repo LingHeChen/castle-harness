@@ -138,6 +138,17 @@ body {
 }
 .phase-pill.past { color: var(--green); border-color: rgba(63,185,80,0.4); }
 .phase-pill.current { color: var(--text); border-color: var(--accent); background: rgba(88,166,255,0.12); }
+.badge.waiting { background: rgba(210,153,34,0.18); color: var(--yellow); }
+
+/* HIL checkpoint panels */
+.panel.checkpoint { border-color: var(--yellow); box-shadow: 0 0 0 1px rgba(210,153,34,0.25); }
+.panel.checkpoint h2 { color: var(--yellow); text-transform: none; letter-spacing: 0; font-size: 15px; }
+.clarify-q { margin: 12px 0; }
+.clarify-question { font-weight: 600; }
+.clarify-why { color: var(--muted); font-size: 12px; margin: 2px 0 6px; }
+.clarify-q input { width: 100%; background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px; color: var(--text); padding: 8px; font: inherit; }
+.clarify-q input:focus { outline: none; border-color: var(--accent); }
+.checkpoint-go { margin-top: 12px; background: var(--yellow); color: #1a1204; border: 0; border-radius: 6px; padding: 9px 18px; font-weight: 700; cursor: pointer; }
 
 .intent { line-height: 1.6; }
 .assumptions { margin: 10px 0 0; padding-left: 18px; color: var(--muted); font-size: 13px; }

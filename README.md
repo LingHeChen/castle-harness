@@ -180,6 +180,29 @@ The auditor is a **gate, not a comment**: when it flags tests as weak or
 false-passable, they're sent back to a fresh test-writer with the specific issues,
 re-audited, and only then accepted (`--audit-attempts`).
 
+### Recursive decomposition + human-in-the-loop
+
+Decomposition is **recursive**: each node is expanded until it's atomic (or a
+depth cap), producing a task *tree* whose leaves are the executable DAG (deps are
+wired in a second pass over the leaves). Ids are prefixed by parent, so a goal
+like "a unit converter" becomes `root-setup-project`, `root-implement-core`, …
+
+On the dashboard the pipeline is **interactive** — the WebSocket is bidirectional
+and the orchestrator pauses at two checkpoints, awaiting you:
+
+1. **Clarify.** Minimal input in, proactive questions out. Before decomposing, the
+   agent asks what's ambiguous (language, scope, error handling…), each with its
+   rationale, and waits for your answers.
+2. **Approve the plan.** After decomposition, the DAG renders and **no code is
+   written until you approve it.**
+
+Development, tests, and acceptance then run with no further interruption. Each
+build is persisted to `.castle/builds/<id>.json` as it progresses. (Full
+structural DAG editing and click-a-node status are the next steps; today the
+checkpoint is answer-and-approve.)
+
+![clarify checkpoint](docs/build-clarify-checkpoint.png)
+
 ## Memory, skills, MCP
 
 Three ways the harness augments the agent's context, all loaded once at run start
@@ -230,6 +253,8 @@ with `--continue` and turn 3 still recalled the fact — cache-hit climbing 78% 
 | **P5** ✅ | `castle build`: subagents, context-isolated test audit (revise-loop gate), worktree parallel dev, acceptance-gated loop |
 | **P5+** ✅ | Persistent memory, progressive-disclosure skills, hand-rolled MCP stdio client |
 | **P7** ✅ | Interactive multi-turn `castle chat`: disk-persisted, resumable sessions |
+| **P8** ✅ | Recursive decomposition (task tree → leaf DAG) + HIL checkpoints (clarify + approve-plan) over a bidirectional WS; builds persisted to disk |
+| P8+ | Full structural DAG editing + click-a-node agent status (view) |
 | P1 | Tool permissions & risk model, richer file tools |
 | P3 | Textual-style TUI, steering & interruption |
 | P6 | Eval harness on real tasks (success rate / tokens / cost / cache hit) |

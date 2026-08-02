@@ -24,13 +24,15 @@ export class BuildCommand extends Command {
     const outcomes = await build(this.goal, {
       cwd: this.cwd ? resolve(this.cwd) : process.cwd(),
       model: this.model,
-      autonomous: this.yes,
       maxFixAttempts: Number.parseInt(this.fixAttempts, 10) || 2,
       maxAuditAttempts: Number.parseInt(this.auditAttempts, 10) || 1,
       maxDepth: Number.parseInt(this.maxDepth, 10) || 3,
       confidenceThreshold: Number.parseFloat(this.confidence) || 0.75,
       emit: renderBuildEvent,
-      ask: this.yes ? undefined : (q, why) => prompt(`\n? ${q}\n  (why: ${why})\n> `),
+      // CLI: clarify interactively (unless --yes). Plan review/editing is the web UI's job.
+      clarify: this.yes
+        ? undefined
+        : async (questions) => questions.map((q) => prompt(`\n? ${q.question}\n  (why: ${q.why})\n> `) ?? ""),
     }).catch((err) => {
       this.context.stderr.write(`\x1b[31mbuild failed:\x1b[0m ${(err as Error).message}\n`);
       return null;

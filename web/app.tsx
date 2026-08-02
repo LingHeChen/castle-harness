@@ -4,11 +4,19 @@ import "./styles.css";
 import { summarizeEvents, type RunSummary, type TimedEvent } from "../src/core/analysis";
 import type { AgentEvent } from "../src/core/events";
 import type { BuildEvent } from "../src/build/events";
+import type { Task } from "../src/build/schemas";
 import { CacheChart } from "./CacheChart";
 import { Timeline } from "./Timeline";
-import { BuildView } from "./BuildView";
+import { BuildView, type PendingRequest } from "./BuildView";
 
 type RunListEntry = { id: string; steps: number; compactions: number; totalTokens: number; hitRate: number };
+
+type ClarifyQ = { question: string; why: string };
+type ServerMsg =
+  | BuildEvent
+  | { type: "build-started" | "build-ended" }
+  | { type: "clarify-request"; questions: ClarifyQ[] }
+  | { type: "approval-request"; tasks: Task[]; tree?: unknown };
 
 function App() {
   const [runs, setRuns] = useState<RunListEntry[]>([]);
@@ -23,6 +31,13 @@ function App() {
   // Build-pipeline state
   const [buildEvents, setBuildEvents] = useState<BuildEvent[] | null>(null);
   const [building, setBuilding] = useState(false);
+  const [pending, setPending] = useState<PendingRequest | null>(null);
+  const buildWsRef = useRef<WebSocket | null>(null);
+
+  function respond(msg: object) {
+    buildWsRef.current?.send(JSON.stringify(msg));
+    setPending(null);
+  }
 
   async function refreshRuns() {
     const r = await fetch("/api/runs");
@@ -50,16 +65,28 @@ function App() {
     setBuildEvents([]);
     setBuilding(true);
 
+    setPending(null);
     const proto = location.protocol === "https:" ? "wss:" : "ws:";
     const ws = new WebSocket(`${proto}//${location.host}/ws/build`);
+    buildWsRef.current = ws;
     ws.onopen = () => ws.send(JSON.stringify({ type: "build", goal }));
     ws.onmessage = (m) => {
-      const ev = JSON.parse(m.data) as BuildEvent | { type: "build-started" | "build-ended" };
+      const ev = JSON.parse(m.data) as ServerMsg;
       if (ev.type === "build-started") return;
       if (ev.type === "build-ended") {
         setBuilding(false);
+        setPending(null);
         ws.close();
         refreshRuns();
+        return;
+      }
+      // Checkpoint requests pause the pipeline waiting for the user.
+      if (ev.type === "clarify-request") {
+        setPending({ kind: "clarify", questions: ev.questions });
+        return;
+      }
+      if (ev.type === "approval-request") {
+        setPending({ kind: "approval", tasks: ev.tasks });
         return;
       }
       events.push(ev as BuildEvent);
@@ -126,7 +153,7 @@ function App() {
 
       <main className="main">
         {buildEvents ? (
-          <BuildView events={buildEvents} running={building} />
+          <BuildView events={buildEvents} running={building} pending={pending} respond={respond} />
         ) : view ? (
           <RunDetail summary={view} live={live !== null} running={running} />
         ) : (

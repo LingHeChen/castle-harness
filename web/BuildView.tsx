@@ -1,8 +1,13 @@
-import React from "react";
+import React, { useState } from "react";
 import type { BuildEvent, BuildTask, TaskStatus } from "../src/build/events";
+import type { Task } from "../src/build/schemas";
 import { DagChart } from "./DagChart";
 
 const PHASES = ["understand", "decompose", "tests + audit", "develop", "acceptance"];
+
+export type PendingRequest =
+  | { kind: "clarify"; questions: Array<{ question: string; why: string }> }
+  | { kind: "approval"; tasks: Task[] };
 
 type Audit = { sound: boolean; canFalsePass: boolean; issues: string[] };
 type BuildState = {
@@ -49,20 +54,39 @@ export function foldBuild(events: BuildEvent[]): BuildState {
   return s;
 }
 
-export function BuildView({ events, running }: { events: BuildEvent[]; running: boolean }) {
+export function BuildView({
+  events,
+  running,
+  pending,
+  respond,
+}: {
+  events: BuildEvent[];
+  running: boolean;
+  pending: PendingRequest | null;
+  respond: (msg: object) => void;
+}) {
   const s = foldBuild(events);
   const passed = s.report?.filter((o) => o.passed).length ?? 0;
 
   return (
     <>
       <div className="detail-header">
-        {running ? <span className="badge live">● building</span> : s.report ? <span className="badge done">done</span> : null}
+        {pending ? (
+          <span className="badge waiting">● awaiting you</span>
+        ) : running ? (
+          <span className="badge live">● building</span>
+        ) : s.report ? (
+          <span className="badge done">done</span>
+        ) : null}
         {PHASES.map((p, i) => (
           <span key={p} className={`phase-pill ${s.phase > i ? "past" : ""} ${s.phase === i + 1 ? "current" : ""}`}>
             {i + 1} {p}
           </span>
         ))}
       </div>
+
+      {pending?.kind === "clarify" && <ClarifyPanel questions={pending.questions} respond={respond} />}
+      {pending?.kind === "approval" && <ApprovalPanel tasks={pending.tasks} respond={respond} />}
 
       {s.intent && (
         <section className="panel">
@@ -117,5 +141,40 @@ export function BuildView({ events, running }: { events: BuildEvent[]; running: 
         </section>
       )}
     </>
+  );
+}
+
+function ClarifyPanel({ questions, respond }: { questions: Array<{ question: string; why: string }>; respond: (msg: object) => void }) {
+  const [answers, setAnswers] = useState<string[]>(() => questions.map(() => ""));
+  return (
+    <section className="panel checkpoint">
+      <h2>⏸ the agent needs to clarify before decomposing</h2>
+      {questions.map((q, i) => (
+        <div key={i} className="clarify-q">
+          <div className="clarify-question">{q.question}</div>
+          <div className="clarify-why">{q.why}</div>
+          <input
+            value={answers[i]}
+            placeholder="your answer (blank = use its assumption)"
+            onChange={(e) => setAnswers(answers.map((a, j) => (j === i ? e.target.value : a)))}
+          />
+        </div>
+      ))}
+      <button className="checkpoint-go" onClick={() => respond({ type: "clarify-response", answers })}>
+        send answers →
+      </button>
+    </section>
+  );
+}
+
+function ApprovalPanel({ tasks, respond }: { tasks: Task[]; respond: (msg: object) => void }) {
+  return (
+    <section className="panel checkpoint">
+      <h2>⏸ review the plan — {tasks.length} tasks — approve to start building</h2>
+      <p className="hint">The DAG below is the proposed plan. Development doesn't start until you approve. (Structural editing lands next.)</p>
+      <button className="checkpoint-go" onClick={() => respond({ type: "approval-response", tasks })}>
+        approve &amp; build →
+      </button>
+    </section>
   );
 }

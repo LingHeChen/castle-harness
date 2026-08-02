@@ -7,19 +7,23 @@ import { recursiveDecompose, type DecomposeResult } from "./decompose";
 import { type TaskNode } from "./tree";
 import { toWaves } from "./graph";
 import { isGitRepo, ensureCommitted, addWorktree, mergeWorktree, removeWorktree } from "./worktree";
+import { saveBuild, newBuildId, type BuildRecord } from "./store";
 import type { BuildEmit, BuildTreeNode } from "./events";
 
 export type BuildOptions = {
   cwd: string;
   model?: string;
-  autonomous: boolean; // skip interactive clarification, proceed on assumptions
   maxFixAttempts: number;
   maxAuditAttempts: number; // times an auditor can send weak tests back to be rewritten
   maxDepth: number; // recursion depth cap for decomposition
   confidenceThreshold: number;
   emit: BuildEmit;
-  /** Interactive clarification callback (CLI). Omitted → treated as autonomous. */
-  ask?: (question: string, why: string) => string | null;
+  /** HIL checkpoint 1: ask the user clarifying questions; returns one answer per
+   *  question. Omitted → skip clarification (autonomous). */
+  clarify?: (questions: Array<{ question: string; why: string }>) => Promise<string[]>;
+  /** HIL checkpoint 2: let the user review/edit the plan before any code is written.
+   *  Returns the (possibly edited) task set to execute. Omitted → autonomous. */
+  reviewPlan?: (tasks: Task[], tree: BuildTreeNode) => Promise<Task[]>;
 };
 
 export type TaskOutcome = { task: Task; passed: boolean; attempts: number; detail: string };
@@ -27,33 +31,45 @@ export type TaskOutcome = { task: Task; passed: boolean; attempts: number; detai
 const TEST_DIR = "acceptance";
 
 /** The full plan→test→build→verify pipeline. Emits {@link BuildEvent}s throughout. */
-export async function build(goal: string, opts: BuildOptions): Promise<TaskOutcome[]> {
+export async function build(goal: string, opts: BuildOptions, now = Date.now()): Promise<TaskOutcome[]> {
   const { emit } = opts;
   if (!(await isGitRepo(opts.cwd))) {
     throw new Error("castle build needs a git repository (worktrees are used for parallel dev). Run `git init` first.");
   }
 
-  const intent = await understand(goal, opts);
-  const { tree, tasks } = await decompose(intent, opts);
-  emit({ type: "tree", tree: toBuildTree(tree) });
-  const waves = toWaves(tasks);
-  emit({
-    type: "graph",
-    tasks: tasks.map((t) => ({ id: t.id, title: t.title, dependsOn: t.dependsOn, files: t.files })),
-    waves: waves.map((w) => w.map((t) => t.id)),
-  });
-  emit({ type: "log", message: `Decomposed into ${tasks.length} leaf tasks across ${waves.length} waves.` });
+  const record: BuildRecord = { id: newBuildId(now), createdAt: now, goal };
+  const persist = () => saveBuild(opts.cwd, record);
 
-  await writeAndAuditTests(tasks, opts);
+  const intent = await understand(goal, opts);
+  record.intent = intent.expandedIntent;
+  await persist();
+
+  const { tree, tasks } = await decompose(intent, opts);
+  const buildTree = toBuildTree(tree);
+  emit({ type: "tree", tree: buildTree });
+  emitGraph(emit, tasks);
+  emit({ type: "log", message: `Decomposed into ${tasks.length} leaf tasks. Review the plan to proceed.` });
+  record.tree = buildTree;
+
+  // HIL checkpoint: let the user review/edit the DAG before any code is written.
+  let plan = tasks;
+  if (opts.reviewPlan) {
+    plan = await opts.reviewPlan(tasks, buildTree);
+    emitGraph(emit, plan); // re-emit the approved (possibly edited) plan
+  }
+  const waves = toWaves(plan);
+  record.tasks = plan;
+  await persist();
+
+  await writeAndAuditTests(plan, opts);
   await ensureCommitted(opts.cwd, "castle: acceptance tests");
 
   await develop(waves, opts);
 
-  const outcomes = await accept(tasks, opts);
-  emit({
-    type: "report",
-    outcomes: outcomes.map((o) => ({ id: o.task.id, passed: o.passed, attempts: o.attempts, detail: o.detail })),
-  });
+  const outcomes = await accept(plan, opts);
+  record.outcomes = outcomes.map((o) => ({ id: o.task.id, passed: o.passed, attempts: o.attempts, detail: o.detail }));
+  await persist();
+  emit({ type: "report", outcomes: record.outcomes });
   emit({ type: "done" });
   return outcomes;
 }
@@ -80,16 +96,15 @@ async function understand(goal: string, opts: BuildOptions): Promise<Intent> {
     needsClarification,
   });
 
-  if (!needsClarification || opts.autonomous || !opts.ask) return intent;
+  if (!needsClarification || !opts.clarify) return intent;
 
   // Interactive: ask the user, fold answers into the intent.
-  const answers: string[] = [];
-  for (const c of intent.clarifications) {
-    const ans = opts.ask(c.question, c.why);
-    if (ans && ans.trim()) answers.push(`Q: ${c.question}\nA: ${ans.trim()}`);
-  }
-  if (answers.length === 0) return intent;
-  return { ...intent, expandedIntent: `${intent.expandedIntent}\n\nClarifications:\n${answers.join("\n")}`, clarifications: [] };
+  const answers = await opts.clarify(intent.clarifications);
+  const folded = intent.clarifications
+    .map((c, i) => (answers[i]?.trim() ? `Q: ${c.question}\nA: ${answers[i]!.trim()}` : ""))
+    .filter(Boolean);
+  if (folded.length === 0) return intent;
+  return { ...intent, expandedIntent: `${intent.expandedIntent}\n\nClarifications:\n${folded.join("\n")}`, clarifications: [] };
 }
 
 // ── Phase 2: Recursive decompose ─────────────────────────────────────
@@ -105,6 +120,16 @@ async function decompose(intent: Intent, opts: BuildOptions): Promise<DecomposeR
 /** Serialize the decomposition tree for the UI (drops leaf-only detail). */
 function toBuildTree(node: TaskNode): BuildTreeNode {
   return { id: node.id, title: node.title, leaf: node.children.length === 0, children: node.children.map(toBuildTree) };
+}
+
+/** Emit a graph event with waves computed from the given task set. */
+function emitGraph(emit: BuildOptions["emit"], tasks: Task[]): void {
+  const waves = toWaves(tasks);
+  emit({
+    type: "graph",
+    tasks: tasks.map((t) => ({ id: t.id, title: t.title, dependsOn: t.dependsOn, files: t.files })),
+    waves: waves.map((w) => w.map((t) => t.id)),
+  });
 }
 
 // ── Phase 3: Acceptance tests + isolated audit (with revise loop) ────

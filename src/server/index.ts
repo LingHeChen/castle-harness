@@ -2,10 +2,11 @@ import type { Server, ServerWebSocket } from "bun";
 import index from "../../web/index.html";
 import { runAgent } from "../core/agent";
 import { build } from "../build/orchestrator";
+import type { Task } from "../build/schemas";
 import { Tracer } from "../core/trace";
 import { listRuns, getRun } from "./runs";
 
-type WsData = { running: boolean; cwd: string };
+type WsData = { running: boolean; cwd: string; pending?: (v: unknown) => void };
 
 /**
  * The dashboard server. Two jobs:
@@ -42,10 +43,22 @@ export function startServer(port: number, cwd: string = process.cwd()): Server<W
 
     websocket: {
       message(ws: ServerWebSocket<WsData>, raw) {
-        let msg: BuildMsg & RunMsg;
+        let msg: ClientMsg;
         try {
           msg = JSON.parse(String(raw));
         } catch {
+          return;
+        }
+        // Responses to a checkpoint resolve the paused build — handle these even
+        // while a build is running (that's the whole point).
+        if (msg.type === "clarify-response") {
+          ws.data.pending?.(msg.answers ?? []);
+          ws.data.pending = undefined;
+          return;
+        }
+        if (msg.type === "approval-response") {
+          ws.data.pending?.(msg.tasks);
+          ws.data.pending = undefined;
           return;
         }
         if (ws.data.running) return;
@@ -57,30 +70,60 @@ export function startServer(port: number, cwd: string = process.cwd()): Server<W
           void streamBuild(ws, msg);
         }
       },
+      close(ws: ServerWebSocket<WsData>) {
+        // Don't leave a paused build hanging if the browser goes away.
+        ws.data.pending?.(undefined);
+        ws.data.pending = undefined;
+      },
     },
   });
 }
 
-type RunMsg = { type?: string; task?: string; maxSteps?: number; compact?: boolean; contextBudget?: number };
-type BuildMsg = { type?: string; goal?: string; model?: string; fixAttempts?: number };
+type ClientMsg = {
+  type?: string;
+  task?: string;
+  maxSteps?: number;
+  compact?: boolean;
+  contextBudget?: number;
+  goal?: string;
+  model?: string;
+  fixAttempts?: number;
+  answers?: string[];
+  tasks?: Task[];
+};
 
-async function streamBuild(ws: ServerWebSocket<WsData>, msg: BuildMsg): Promise<void> {
+async function streamBuild(ws: ServerWebSocket<WsData>, msg: ClientMsg): Promise<void> {
+  // Ask the client for input at a checkpoint and await its response over the WS.
+  const request = <T>(type: string, payload: object): Promise<T> =>
+    new Promise<T>((resolve) => {
+      ws.data.pending = resolve as (v: unknown) => void;
+      ws.send(JSON.stringify({ type, ...payload }));
+    });
+
   ws.send(JSON.stringify({ type: "build-started" }));
   try {
     await build(msg.goal!, {
       cwd: ws.data.cwd,
       model: msg.model,
-      autonomous: true, // the browser can't answer clarification prompts
       maxFixAttempts: msg.fixAttempts ?? 2,
       maxAuditAttempts: 1,
       maxDepth: 3,
       confidenceThreshold: 0.75,
       emit: (ev) => ws.send(JSON.stringify(ev)),
+      clarify: async (questions) => {
+        const ans = await request<string[] | undefined>("clarify-request", { questions });
+        return Array.isArray(ans) ? ans : [];
+      },
+      reviewPlan: async (tasks, tree) => {
+        const edited = await request<Task[] | undefined>("approval-request", { tasks, tree });
+        return Array.isArray(edited) && edited.length > 0 ? edited : tasks;
+      },
     });
   } catch (err) {
     ws.send(JSON.stringify({ type: "error", message: (err as Error).message }));
   } finally {
     ws.data.running = false;
+    ws.data.pending = undefined;
     ws.send(JSON.stringify({ type: "build-ended" }));
   }
 }
