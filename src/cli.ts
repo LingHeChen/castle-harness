@@ -4,6 +4,8 @@ import { RunCommand } from "./commands/run";
 import { TraceCommand } from "./commands/trace";
 import { ServeCommand } from "./commands/serve";
 import { BuildCommand } from "./commands/build";
+import { ChatCommand } from "./commands/chat";
+import { SessionsCommand } from "./commands/sessions";
 
 export function createCli(cfg: Partial<CliOptions>): Cli {
   const cli = new Cli(cfg);
@@ -15,6 +17,8 @@ export function createCli(cfg: Partial<CliOptions>): Cli {
   cli.register(TraceCommand)
   cli.register(ServeCommand)
   cli.register(BuildCommand)
+  cli.register(ChatCommand)
+  cli.register(SessionsCommand)
 
   return cli;
 }

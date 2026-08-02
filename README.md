@@ -21,7 +21,8 @@ and a per-run JSONL trace. `castle trace <file>` reconstructs the token/cache
 economics of any run. `castle serve` opens a React dashboard that live-streams a
 running agent and charts its KV-cache curve. `castle build "<goal>"` runs a
 spec-driven pipeline: understand → decompose → write+audit acceptance tests →
-develop in parallel git worktrees → loop until the tests pass. The agent also has
+develop in parallel git worktrees → loop until the tests pass. `castle chat` is an
+interactive, disk-persisted, resumable multi-turn session. The agent also has
 persistent memory, on-demand skills, and a hand-rolled MCP client.
 
 ![dashboard](docs/dashboard.png)
@@ -60,12 +61,13 @@ src/
 │   ├── memory.ts     # persistent per-project agent memory
 │   ├── skills.ts     # progressive-disclosure skill catalogue
 │   ├── mcp.ts        # hand-rolled MCP stdio client (JSON-RPC)
+│   ├── session.ts    # persisted multi-turn conversations (resumable)
 │   └── trace.ts      # append-only JSONL tracer (one file per run)
 ├── tools/            # bash · read/write/edit/list · remember · load_skill
 ├── build/            # spec-driven pipeline: schemas · graph · worktree · orchestrator
 ├── server/           # Bun.serve: JSON API + WebSocket live-run streaming
 ├── render.ts         # terminal renderer for the event stream
-└── commands/         # run · trace · serve · build
+└── commands/         # run · chat · sessions · trace · serve · build
 web/                  # React dashboard (hand-rolled SVG cache chart, no chart dep)
 ```
 
@@ -197,6 +199,27 @@ so they sit in the stable prompt prefix:
 Verified in one run: the agent called an `mcp__demo__echo` tool, `load_skill`-ed a
 skill and followed it, and `remember`-ed a fact that persisted to disk.
 
+## Interactive sessions
+
+`castle chat` is a multi-turn conversation, not a one-shot task. The whole message
+history (user, assistant, tool) is **persisted to disk** at
+`.castle/sessions/<id>.json` after every turn, so a session survives the process
+and resumes with `--continue` (or `--resume <id>`); `castle sessions` lists them.
+
+Dependencies — model, tools, MCP connections, and the memory/skills-augmented
+system prompt — are built once per session and reused across turns, so the prompt
+prefix stays stable and the KV cache stays warm turn to turn.
+
+The refactor that made this possible is small: `prepareAgent()` builds the
+per-session deps once, and `streamMessages()` streams one turn over the running
+history and returns the messages it generated. `castle run` is now just the
+one-shot special case (a single turn over `[user(task)]`); `ChatSession` loops it.
+
+Verified end-to-end across a process restart: turn 1 stated a fact, turn 2
+computed with it (`bash echo $((42*2))` → 84), then a **fresh process** resumed
+with `--continue` and turn 3 still recalled the fact — cache-hit climbing 78% →
+98% → 96% across turns as the stable prefix pays off.
+
 ## Roadmap
 
 | Phase | Focus |
@@ -206,8 +229,9 @@ skill and followed it, and `remember`-ed a fact that persisted to disk.
 | **P4** ✅ | `Bun.serve` API + WebSocket live-run + React dashboard with SVG cache chart |
 | **P5** ✅ | `castle build`: subagents, context-isolated test audit (revise-loop gate), worktree parallel dev, acceptance-gated loop |
 | **P5+** ✅ | Persistent memory, progressive-disclosure skills, hand-rolled MCP stdio client |
+| **P7** ✅ | Interactive multi-turn `castle chat`: disk-persisted, resumable sessions |
 | P1 | Tool permissions & risk model, richer file tools |
-| P3 | Textual-style TUI |
+| P3 | Textual-style TUI, steering & interruption |
 | P6 | Eval harness on real tasks (success rate / tokens / cost / cache hit) |
 
 ## Development

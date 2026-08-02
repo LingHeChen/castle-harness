@@ -1,4 +1,4 @@
-import { streamText, stepCountIs } from "ai";
+import { streamText, stepCountIs, type ModelMessage, type LanguageModel, type ToolSet } from "ai";
 import { createModel, resolveModelConfig } from "./model";
 import { buildTools } from "../tools";
 import { SYSTEM_PROMPT } from "./prompt";
@@ -24,63 +24,65 @@ export type AgentOptions = {
 };
 
 /**
- * The agent loop, exposed as an async generator of {@link AgentEvent}.
- *
- * We let the SDK drive the think→act→observe iteration (it re-invokes the model
- * after each round of tool calls, up to `stopWhen`), but we consume the raw
- * `fullStream` ourselves and re-express every part as a harness event. That
- * keeps a clean seam: this function is the *only* place coupled to the model
- * SDK — the TUI, server and eval runner all speak {@link AgentEvent}.
+ * Per-run (or per-session) setup: the model, the augmented system prompt, the
+ * tool registry, and any MCP connections. Built once and reused across turns of
+ * an interactive session, so memory/skills/MCP load a single time and the system
+ * prompt stays a stable prefix across the whole conversation.
  */
-export async function* runAgent(task: string, opts: AgentOptions): AsyncGenerator<AgentEvent> {
-  const model = createModel(resolveModelConfig(opts.model));
+export type AgentDeps = { model: LanguageModel; system: string; tools: ToolSet; closeMcp: () => void };
 
-  // Load persistent memory + available skills once, at run start. Both become a
-  // stable part of the prompt prefix for this run (cache-friendly); skills use
-  // progressive disclosure — only names/descriptions here, bodies load on demand.
+export async function prepareAgent(opts: { cwd: string; model?: string; system?: string }): Promise<AgentDeps> {
+  const model = createModel(resolveModelConfig(opts.model));
+  // Loaded once: memory + skills become a stable part of the prompt prefix.
   const [memory, skills] = await Promise.all([loadMemory(opts.cwd), listSkills(opts.cwd)]);
   const system = augmentSystem(opts.system ?? SYSTEM_PROMPT, memory, skills);
-
-  // Connect any MCP servers configured in .castle/mcp.json; their tools join the
-  // registry namespaced mcp__<server>__<tool>. Closed in the finally below.
+  // MCP tools join the registry namespaced mcp__<server>__<tool>.
   const mcp = await connectConfiguredMcp(opts.cwd);
-  const tools = { ...buildTools({ cwd: opts.cwd, tracer: opts.tracer, skills }), ...mcp.tools };
+  const tools = { ...buildTools({ cwd: opts.cwd, skills }), ...mcp.tools };
+  return { model, system, tools, closeMcp: mcp.close };
+}
 
-  // Context engineering: compact the message window when it grows past budget.
+export type TurnConfig = { tracer: Tracer; maxSteps: number; compact?: boolean; contextBudget?: number };
+
+/**
+ * Stream one turn over the given message history, re-expressing the SDK's raw
+ * stream as {@link AgentEvent}s. Returns the messages the model generated this
+ * turn (assistant + tool), so a session can append them and persist.
+ *
+ * This is the single seam coupled to the model SDK; the TUI, server, eval runner,
+ * and interactive session all speak {@link AgentEvent}.
+ */
+export async function* streamMessages(
+  messages: ModelMessage[],
+  deps: AgentDeps,
+  cfg: TurnConfig,
+): AsyncGenerator<AgentEvent, ModelMessage[]> {
   const context =
-    opts.compact === false
+    cfg.compact === false
       ? null
-      : new ContextManager({
-          budgetTokens: opts.contextBudget ?? 20_000,
-          keepRecentSegments: 4,
-          summarize: createSummarizer(model),
-        });
+      : new ContextManager({ budgetTokens: cfg.contextBudget ?? 20_000, keepRecentSegments: 4, summarize: createSummarizer(deps.model) });
 
-  // Track when each tool call started so we can report execution latency.
   const started = new Map<string, number>();
 
-  try {
   const result = streamText({
-    model,
-    system,
-    prompt: task,
-    tools,
-    stopWhen: stepCountIs(opts.maxSteps),
+    model: deps.model,
+    system: deps.system,
+    messages,
+    tools: deps.tools,
+    stopWhen: stepCountIs(cfg.maxSteps),
     prepareStep: context
-      ? async ({ messages }) => {
-          const compacted = await context.prepare(messages);
-          return compacted === messages ? {} : { messages: compacted };
+      ? async ({ messages: msgs }) => {
+          const compacted = await context.prepare(msgs);
+          return compacted === msgs ? {} : { messages: compacted };
         }
       : undefined,
   });
 
   const emit = (ev: AgentEvent): AgentEvent => {
-    opts.tracer.event(ev);
+    cfg.tracer.event(ev);
     return ev;
   };
 
-  // Compaction happens inside prepareStep (before a step); surface any pending
-  // context events into our stream at the step boundary that follows.
   function* flushContext(): Generator<AgentEvent> {
     if (!context) return;
     for (const ev of context.drain()) yield emit(ev);
@@ -108,14 +110,7 @@ export async function* runAgent(task: string, opts: AgentOptions): AsyncGenerato
       case "tool-result": {
         const begun = started.get(part.toolCallId) ?? performance.now();
         const ms = Math.round(performance.now() - begun);
-        yield emit({
-          type: "tool-result",
-          id: part.toolCallId,
-          name: part.toolName,
-          output: stringifyOutput(part.output),
-          ok: true,
-          ms,
-        });
+        yield emit({ type: "tool-result", id: part.toolCallId, name: part.toolName, output: stringifyOutput(part.output), ok: true, ms });
         break;
       }
       case "finish-step":
@@ -128,12 +123,21 @@ export async function* runAgent(task: string, opts: AgentOptions): AsyncGenerato
   }
 
   yield* flushContext();
-  const [text, usage] = await Promise.all([result.text, result.totalUsage]);
+  const [response, text, usage] = await Promise.all([result.response, result.text, result.totalUsage]);
   const done = toUsage(usage);
-  opts.tracer.final(done);
+  cfg.tracer.final(done);
   yield emit({ type: "done", text, usage: done });
+  return response.messages;
+}
+
+/** One-shot: run a single task to completion and stream its events. */
+export async function* runAgent(task: string, opts: AgentOptions): AsyncGenerator<AgentEvent> {
+  const deps = await prepareAgent({ cwd: opts.cwd, model: opts.model, system: opts.system });
+  try {
+    const messages: ModelMessage[] = [{ role: "user", content: task }];
+    yield* streamMessages(messages, deps, { tracer: opts.tracer, maxSteps: opts.maxSteps, compact: opts.compact, contextBudget: opts.contextBudget });
   } finally {
-    mcp.close();
+    deps.closeMcp();
   }
 }
 

@@ -4,15 +4,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { truncate } from "./core/util";
 import { toUsage } from "./core/events";
-import { Tracer } from "./core/trace";
 import { buildTools } from "./tools";
 import type { ToolSet } from "ai";
 
 function tempCtx() {
   const dir = mkdtempSync(join(tmpdir(), "castle-test-"));
-  const tracer = new Tracer(join(dir, "traces"));
-  const tools = buildTools({ cwd: dir, tracer });
-  return { dir, tracer, tools };
+  const tools = buildTools({ cwd: dir });
+  return { dir, tools };
 }
 
 // The ai `tool()` wrapper stores our implementation on `.execute`; call it directly.

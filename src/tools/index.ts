@@ -1,5 +1,4 @@
 import type { ToolSet } from "ai";
-import type { Tracer } from "../core/trace";
 import type { Skill } from "../core/skills";
 import { bashTool } from "./bash";
 import { fsTools } from "./fs";
@@ -8,12 +7,11 @@ import { rememberTool, loadSkillTool } from "./context";
 /** Shared context threaded into every tool: where it runs and its output cap. */
 export type ToolContext = {
   cwd: string;
-  tracer: Tracer;
   maxOutput: number;
 };
 
-export function buildTools(opts: { cwd: string; tracer: Tracer; skills?: Skill[] }): ToolSet {
-  const ctx: ToolContext = { cwd: opts.cwd, tracer: opts.tracer, maxOutput: 16_000 };
+export function buildTools(opts: { cwd: string; skills?: Skill[] }): ToolSet {
+  const ctx: ToolContext = { cwd: opts.cwd, maxOutput: 16_000 };
   const tools: ToolSet = {
     bash: bashTool(ctx),
     ...fsTools(ctx),
