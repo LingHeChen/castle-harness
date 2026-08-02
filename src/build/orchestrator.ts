@@ -2,10 +2,12 @@ import { $ } from "bun";
 import { think, work } from "../core/subagent";
 import { Tracer } from "../core/trace";
 import type { AgentEvent } from "../core/events";
-import { IntentSchema, TaskGraphSchema, AuditVerdictSchema, type Intent, type Task } from "./schemas";
+import { IntentSchema, AuditVerdictSchema, type Intent, type Task } from "./schemas";
+import { recursiveDecompose, type DecomposeResult } from "./decompose";
+import { type TaskNode } from "./tree";
 import { toWaves } from "./graph";
 import { isGitRepo, ensureCommitted, addWorktree, mergeWorktree, removeWorktree } from "./worktree";
-import type { BuildEmit } from "./events";
+import type { BuildEmit, BuildTreeNode } from "./events";
 
 export type BuildOptions = {
   cwd: string;
@@ -13,6 +15,7 @@ export type BuildOptions = {
   autonomous: boolean; // skip interactive clarification, proceed on assumptions
   maxFixAttempts: number;
   maxAuditAttempts: number; // times an auditor can send weak tests back to be rewritten
+  maxDepth: number; // recursion depth cap for decomposition
   confidenceThreshold: number;
   emit: BuildEmit;
   /** Interactive clarification callback (CLI). Omitted → treated as autonomous. */
@@ -31,14 +34,15 @@ export async function build(goal: string, opts: BuildOptions): Promise<TaskOutco
   }
 
   const intent = await understand(goal, opts);
-  const tasks = await decompose(intent, opts);
+  const { tree, tasks } = await decompose(intent, opts);
+  emit({ type: "tree", tree: toBuildTree(tree) });
   const waves = toWaves(tasks);
   emit({
     type: "graph",
     tasks: tasks.map((t) => ({ id: t.id, title: t.title, dependsOn: t.dependsOn, files: t.files })),
     waves: waves.map((w) => w.map((t) => t.id)),
   });
-  emit({ type: "log", message: `Decomposed into ${tasks.length} tasks across ${waves.length} waves.` });
+  emit({ type: "log", message: `Decomposed into ${tasks.length} leaf tasks across ${waves.length} waves.` });
 
   await writeAndAuditTests(tasks, opts);
   await ensureCommitted(opts.cwd, "castle: acceptance tests");
@@ -88,20 +92,19 @@ async function understand(goal: string, opts: BuildOptions): Promise<Intent> {
   return { ...intent, expandedIntent: `${intent.expandedIntent}\n\nClarifications:\n${answers.join("\n")}`, clarifications: [] };
 }
 
-// ── Phase 2: Decompose ───────────────────────────────────────────────
-async function decompose(intent: Intent, opts: BuildOptions): Promise<Task[]> {
-  opts.emit({ type: "phase", n: 2, title: "decompose" });
-  const { tasks } = await think({
+// ── Phase 2: Recursive decompose ─────────────────────────────────────
+async function decompose(intent: Intent, opts: BuildOptions): Promise<DecomposeResult> {
+  opts.emit({ type: "phase", n: 2, title: "decompose (recursive)" });
+  return recursiveDecompose(intent, {
     model: opts.model,
-    schema: TaskGraphSchema,
-    system:
-      "You are a tech lead. Break the intent into the smallest set of atomic, independently " +
-      "testable tasks. Each task needs concrete acceptance criteria. Use `dependsOn` to encode " +
-      "ordering and `files` to declare what each task touches — tasks that can run in parallel " +
-      "MUST NOT share files. Prefer more small tasks over few large ones.",
-    prompt: `Intent:\n${intent.expandedIntent}\n\nAssumptions:\n${intent.assumptions.join("\n")}`,
+    maxDepth: opts.maxDepth,
+    onNode: (n) => opts.emit({ type: "node", id: n.id, title: n.title, depth: n.depth, leaf: n.leaf }),
   });
-  return tasks;
+}
+
+/** Serialize the decomposition tree for the UI (drops leaf-only detail). */
+function toBuildTree(node: TaskNode): BuildTreeNode {
+  return { id: node.id, title: node.title, leaf: node.children.length === 0, children: node.children.map(toBuildTree) };
 }
 
 // ── Phase 3: Acceptance tests + isolated audit (with revise loop) ────

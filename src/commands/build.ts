@@ -17,6 +17,7 @@ export class BuildCommand extends Command {
   yes = Option.Boolean("--yes", false, { description: "Autonomous: skip clarification, proceed on assumptions" });
   fixAttempts = Option.String("--fix-attempts", "2", { description: "Max fix attempts per failing task" });
   auditAttempts = Option.String("--audit-attempts", "1", { description: "Times weak tests get sent back to rewrite" });
+  maxDepth = Option.String("--max-depth", "3", { description: "Recursive decomposition depth cap" });
   confidence = Option.String("--confidence", "0.75", { description: "Clarify below this confidence (0..1)" });
 
   override async execute(): Promise<number | void> {
@@ -26,6 +27,7 @@ export class BuildCommand extends Command {
       autonomous: this.yes,
       maxFixAttempts: Number.parseInt(this.fixAttempts, 10) || 2,
       maxAuditAttempts: Number.parseInt(this.auditAttempts, 10) || 1,
+      maxDepth: Number.parseInt(this.maxDepth, 10) || 3,
       confidenceThreshold: Number.parseFloat(this.confidence) || 0.75,
       emit: renderBuildEvent,
       ask: this.yes ? undefined : (q, why) => prompt(`\n? ${q}\n  (why: ${why})\n> `),

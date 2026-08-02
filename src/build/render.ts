@@ -14,7 +14,16 @@ export function renderBuildEvent(ev: BuildEvent): void {
       if (ev.assumptions.length) out.write(ev.assumptions.map((a) => `${C.dim}  · ${a}${C.reset}`).join("\n") + "\n");
       out.write(`${C.dim}confidence ${Math.round(ev.confidence * 100)}%${ev.needsClarification ? " — clarification needed" : ""}${C.reset}\n`);
       break;
+    case "node": {
+      const indent = "  ".repeat(ev.depth);
+      const marker = ev.leaf ? `${C.green}•${C.reset}` : `${C.dim}▸${C.reset}`;
+      out.write(`${indent}${marker} ${ev.title} ${C.dim}(${ev.id})${C.reset}\n`);
+      break;
+    }
+    case "tree":
+      break; // already streamed as `node` events above
     case "graph":
+      out.write(`${C.dim}leaves → DAG:${C.reset}\n`);
       for (const t of ev.tasks) {
         const after = t.dependsOn.length ? ` ${C.dim}(after ${t.dependsOn.join(", ")})${C.reset}` : "";
         out.write(`· ${t.id}${after} — ${t.title}\n`);

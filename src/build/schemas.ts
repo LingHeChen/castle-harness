@@ -27,6 +27,27 @@ export const TaskGraphSchema = z.object({
 });
 export type TaskGraph = z.infer<typeof TaskGraphSchema>;
 
+/**
+ * Phase 2 (recursive) — one step of top-down decomposition of a single node.
+ * Either the node is atomic (→ acceptance criteria + files, becomes a leaf) or it
+ * splits into smaller subtasks (→ recurse into each).
+ */
+export const DecomposeStepSchema = z.object({
+  atomic: z.boolean().describe("True if this is one independently testable unit that should NOT be split further."),
+  acceptanceCriteria: z.array(z.string()).describe("If atomic: observable, testable conditions for done."),
+  files: z.array(z.string()).describe("If atomic: files this task will create or modify."),
+  subtasks: z
+    .array(z.object({ id: z.string(), title: z.string(), description: z.string() }))
+    .describe("If not atomic: the smallest sensible subtasks it breaks into."),
+});
+export type DecomposeStep = z.infer<typeof DecomposeStepSchema>;
+
+/** Phase 2 (recursive) — dependency edges between the flattened leaf tasks. */
+export const DependencyWiringSchema = z.object({
+  dependencies: z.array(z.object({ task: z.string(), dependsOn: z.array(z.string()) })),
+});
+export type DependencyWiring = z.infer<typeof DependencyWiringSchema>;
+
 /** Phase 3 — a context-isolated auditor's verdict on a task's acceptance tests. */
 export const AuditVerdictSchema = z.object({
   sound: z.boolean().describe("Do the tests correctly encode the acceptance criteria?"),

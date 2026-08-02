@@ -23,9 +23,14 @@ export type TaskStatus =
   | "passing"
   | "failing";
 
+/** A node in the decomposition tree, as sent to the UI (children empty = leaf). */
+export type BuildTreeNode = { id: string; title: string; leaf: boolean; children: BuildTreeNode[] };
+
 export type BuildEvent =
   | { type: "phase"; n: number; title: string }
   | { type: "intent"; expandedIntent: string; assumptions: string[]; confidence: number; needsClarification: boolean }
+  | { type: "node"; id: string; title: string; depth: number; leaf: boolean }
+  | { type: "tree"; tree: BuildTreeNode }
   | { type: "graph"; tasks: BuildTask[]; waves: string[][] }
   | { type: "audit"; taskId: string; sound: boolean; canFalsePass: boolean; issues: string[] }
   | { type: "wave"; index: number; taskIds: string[] }
