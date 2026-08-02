@@ -10,6 +10,9 @@ DeepSeek's API.
 > the context window, the tool protocol, and KV-cache economics — not another
 > wrapper over a chat endpoint.
 
+**Writeup:** [Notes on building a coding-agent harness](docs/harness-notes.md) —
+the design decisions and the honest limitations.
+
 ## Status
 
 **P0 + P2 + P4 + P5.** `castle run "<task>"` streams a real think→act→observe loop
