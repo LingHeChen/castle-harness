@@ -1,0 +1,32 @@
+{
+  "name": "castle",
+  "description": "A coding-agent harness: agent loop, context engineering, tracing, and a spec-driven build pipeline, on Bun + DeepSeek.",
+  "module": "bin/castle.ts",
+  "type": "module",
+  "private": true,
+  "bin": {
+    "castle": "bin/castle.ts"
+  },
+  "scripts": {
+    "start": "bun run bin/castle.ts",
+    "dev": "bun run bin/castle.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.4"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "dependencies": {
+    "@ai-sdk/openai": "^4.0.20",
+    "ai": "^7.0.37",
+    "clipanion": "^4.0.0-rc.4",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "zod": "^4.4.3"
+  }
+}

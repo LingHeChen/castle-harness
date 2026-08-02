@@ -1,0 +1,224 @@
+import { $ } from "bun";
+import { think, work } from "../core/subagent";
+import { Tracer } from "../core/trace";
+import type { AgentEvent } from "../core/events";
+import { IntentSchema, TaskGraphSchema, AuditVerdictSchema, type Intent, type Task } from "./schemas";
+import { toWaves } from "./graph";
+import { isGitRepo, ensureCommitted, addWorktree, mergeWorktree, removeWorktree } from "./worktree";
+import { log, phase, sub } from "./log";
+
+export type BuildOptions = {
+  cwd: string;
+  model?: string;
+  autonomous: boolean; // skip interactive clarification, proceed on assumptions
+  maxFixAttempts: number;
+  confidenceThreshold: number;
+};
+
+export type TaskOutcome = { task: Task; passed: boolean; attempts: number; detail: string };
+
+const TEST_DIR = "acceptance";
+
+/** The full plan→test→build→verify pipeline. */
+export async function build(goal: string, opts: BuildOptions): Promise<TaskOutcome[]> {
+  if (!(await isGitRepo(opts.cwd))) {
+    throw new Error("castle build needs a git repository (worktrees are used for parallel dev). Run `git init` first.");
+  }
+
+  const intent = await understand(goal, opts);
+  const tasks = await decompose(intent, opts);
+  const waves = toWaves(tasks);
+  log(`Decomposed into ${tasks.length} tasks across ${waves.length} waves.`);
+
+  await writeAndAuditTests(tasks, opts);
+  await ensureCommitted(opts.cwd, "castle: acceptance tests");
+
+  await develop(waves, opts);
+
+  return await accept(tasks, opts);
+}
+
+// ── Phase 1: Understand ──────────────────────────────────────────────
+async function understand(goal: string, opts: BuildOptions): Promise<Intent> {
+  phase("1 · understand");
+  const intent = await think({
+    model: opts.model,
+    schema: IntentSchema,
+    system:
+      "You are a meticulous requirements analyst. Expand the user's possibly-vague goal " +
+      "into a precise intent. Be pessimistic: whenever anything material is ambiguous, add " +
+      "a clarifying question instead of guessing. Only claim high confidence when the goal is unambiguous.",
+    prompt: `User goal:\n${goal}`,
+  });
+
+  log(`intent: ${intent.expandedIntent}`);
+  if (intent.assumptions.length) log(`assumptions:\n${intent.assumptions.map((a) => `  · ${a}`).join("\n")}`);
+
+  const uncertain = intent.confidence < opts.confidenceThreshold || intent.clarifications.length > 0;
+  if (!uncertain) return intent;
+
+  log(`confidence ${Math.round(intent.confidence * 100)}% — clarification needed`);
+  if (opts.autonomous) {
+    log("autonomous mode: proceeding on the assumptions above (not confirmed).");
+    return intent;
+  }
+
+  // Interactive: ask the user, fold answers into the intent.
+  const answers: string[] = [];
+  for (const c of intent.clarifications) {
+    const ans = prompt(`\n? ${c.question}\n  (why: ${c.why})\n> `);
+    if (ans && ans.trim()) answers.push(`Q: ${c.question}\nA: ${ans.trim()}`);
+  }
+  if (answers.length === 0) return intent;
+  return { ...intent, expandedIntent: `${intent.expandedIntent}\n\nClarifications:\n${answers.join("\n")}`, clarifications: [] };
+}
+
+// ── Phase 2: Decompose ───────────────────────────────────────────────
+async function decompose(intent: Intent, opts: BuildOptions): Promise<Task[]> {
+  phase("2 · decompose");
+  const { tasks } = await think({
+    model: opts.model,
+    schema: TaskGraphSchema,
+    system:
+      "You are a tech lead. Break the intent into the smallest set of atomic, independently " +
+      "testable tasks. Each task needs concrete acceptance criteria. Use `dependsOn` to encode " +
+      "ordering and `files` to declare what each task touches — tasks that can run in parallel " +
+      "MUST NOT share files. Prefer more small tasks over few large ones.",
+    prompt: `Intent:\n${intent.expandedIntent}\n\nAssumptions:\n${intent.assumptions.join("\n")}`,
+  });
+
+  for (const t of tasks) {
+    log(`· ${t.id}${t.dependsOn.length ? ` (after ${t.dependsOn.join(", ")})` : ""} — ${t.title}`);
+  }
+  return tasks;
+}
+
+// ── Phase 3: Acceptance tests + isolated audit ───────────────────────
+async function writeAndAuditTests(tasks: Task[], opts: BuildOptions): Promise<void> {
+  phase("3 · acceptance tests + audit");
+  for (const t of tasks) {
+    const testPath = `${TEST_DIR}/${t.id}.test.ts`;
+    await work(
+      `Write acceptance tests ONLY (do not implement the feature) for this task, at ${testPath}.\n\n` +
+        `Task: ${t.title}\n${t.description}\n\nAcceptance criteria:\n${t.acceptanceCriteria.map((c) => `- ${c}`).join("\n")}\n\n` +
+        `Files the implementation will live in: ${t.files.join(", ")}. Import from there. ` +
+        `Use bun:test. Each criterion must be a real assertion. The tests should FAIL now (no implementation yet).`,
+      {
+        cwd: opts.cwd,
+        model: opts.model,
+        maxSteps: 12,
+        tracer: new Tracer(".castle/traces", `build-test-${t.id}`),
+        system:
+          "You are a test engineer practising TDD. You write acceptance tests that pin down behaviour. " +
+          "You never write implementation code — only tests. Encode every acceptance criterion as a concrete assertion.",
+        onEvent: (ev) => printSub(t.id, "test", ev),
+      },
+    );
+
+    // Context-isolated auditor: sees only the task + the test file, never the writer's reasoning.
+    const testCode = await Bun.file(`${opts.cwd}/${testPath}`).text().catch(() => "");
+    if (!testCode) {
+      log(`  ! ${t.id}: no test file produced at ${testPath}`);
+      continue;
+    }
+    const verdict = await think({
+      model: opts.model,
+      schema: AuditVerdictSchema,
+      system:
+        "You are an adversarial test auditor with NO prior context. Given a task's acceptance criteria " +
+        "and its test code, judge whether the tests genuinely verify the criteria and whether they could " +
+        "FALSE-PASS without a correct implementation (tautological assertions, mocked-away logic, happy-path only).",
+      prompt: `Acceptance criteria:\n${t.acceptanceCriteria.join("\n")}\n\nTest code (${testPath}):\n${testCode}`,
+    });
+    const flag = verdict.sound && !verdict.canFalsePass ? "✓ sound" : "⚠ weak";
+    log(`  audit ${t.id}: ${flag}${verdict.issues.length ? ` — ${verdict.issues.join("; ")}` : ""}`);
+  }
+}
+
+// ── Phase 4: Parallel development in worktrees ───────────────────────
+async function develop(waves: Task[][], opts: BuildOptions): Promise<void> {
+  phase("4 · develop (parallel, worktree-isolated)");
+  for (let w = 0; w < waves.length; w++) {
+    const wave = waves[w]!;
+    log(`wave ${w + 1}: ${wave.map((t) => t.id).join(", ")}`);
+
+    const built = await Promise.all(
+      wave.map(async (t) => {
+        const wt = await addWorktree(opts.cwd, t.id);
+        await work(
+          `Implement this task so its acceptance tests pass. Run \`bun test ${TEST_DIR}/${t.id}.test.ts\` to check.\n\n` +
+            `Task: ${t.title}\n${t.description}\n\nAcceptance criteria:\n${t.acceptanceCriteria.map((c) => `- ${c}`).join("\n")}\n\n` +
+            `Work only in files: ${t.files.join(", ")}. Do NOT edit the test file.`,
+          {
+            cwd: wt.dir,
+            model: opts.model,
+            maxSteps: 30,
+            tracer: new Tracer(".castle/traces", `build-dev-${t.id}`),
+            onEvent: (ev) => printSub(t.id, "dev", ev),
+          },
+        );
+        return { task: t, wt };
+      }),
+    );
+
+    // Merge sequentially (single index on the main tree); disjoint files → clean.
+    for (const { task, wt } of built) {
+      const res = await mergeWorktree(opts.cwd, wt);
+      log(res.merged ? `  merged ${task.id}` : `  ✗ merge conflict on ${task.id}: ${res.reason}`);
+      await removeWorktree(opts.cwd, wt);
+    }
+  }
+}
+
+// ── Phase 5: Acceptance + honest reporting ───────────────────────────
+async function accept(tasks: Task[], opts: BuildOptions): Promise<TaskOutcome[]> {
+  phase("5 · acceptance");
+  const outcomes: TaskOutcome[] = [];
+
+  for (const t of tasks) {
+    let attempt = 0;
+    let result = await runAcceptance(opts.cwd, t.id);
+
+    while (!result.pass && attempt < opts.maxFixAttempts) {
+      attempt++;
+      log(`  ${t.id}: failing, fix attempt ${attempt}/${opts.maxFixAttempts}`);
+      await work(
+        `The acceptance tests for this task are failing. Fix the IMPLEMENTATION (never the tests) so ` +
+          `\`bun test ${TEST_DIR}/${t.id}.test.ts\` passes.\n\nTask: ${t.title}\n\nTest output:\n${result.output}`,
+        {
+          cwd: opts.cwd,
+          model: opts.model,
+          maxSteps: 25,
+          tracer: new Tracer(".castle/traces", `build-fix-${t.id}-${attempt}`),
+          onEvent: (ev) => printSub(t.id, "fix", ev),
+        },
+      );
+      result = await runAcceptance(opts.cwd, t.id);
+    }
+
+    outcomes.push({
+      task: t,
+      passed: result.pass,
+      attempts: attempt,
+      detail: result.pass ? "acceptance passed" : lastLines(result.output, 8),
+    });
+    log(result.pass ? `  ✓ ${t.id}` : `  ✗ ${t.id} still failing after ${attempt} attempt(s)`);
+  }
+  return outcomes;
+}
+
+async function runAcceptance(cwd: string, id: string): Promise<{ pass: boolean; output: string }> {
+  const res = await $`bun test ${TEST_DIR}/${id}.test.ts`.cwd(cwd).nothrow().quiet();
+  const output = res.stdout.toString() + res.stderr.toString();
+  return { pass: res.exitCode === 0, output };
+}
+
+// ── console helpers ──────────────────────────────────────────────────
+function printSub(id: string, kind: string, ev: AgentEvent): void {
+  if (ev.type === "tool-call") sub(`${id}/${kind}`, `▸ ${ev.name}`);
+  else if (ev.type === "error") sub(`${id}/${kind}`, `✗ ${ev.message}`);
+}
+
+function lastLines(text: string, n: number): string {
+  return text.trim().split("\n").slice(-n).join("\n");
+}

@@ -1,0 +1,178 @@
+# Castle
+
+A coding-agent **harness** — the scaffolding that turns an LLM into an agent
+that can actually work in a repository: an agent loop, a tool layer, context
+engineering, tracing, and an eval harness. Built on Bun + TypeScript, driving
+DeepSeek's API.
+
+> This is a study of *harness engineering* — the parts of an agent that live
+> around the model rather than inside it. The interesting problems are the loop,
+> the context window, the tool protocol, and KV-cache economics — not another
+> wrapper over a chat endpoint.
+
+## Status
+
+**P0 + P2 + P4 + P5.** `castle run "<task>"` streams a real think→act→observe loop
+against DeepSeek, with a file/bash tool suite, a KV-cache-aware context manager,
+and a per-run JSONL trace. `castle trace <file>` reconstructs the token/cache
+economics of any run. `castle serve` opens a React dashboard that live-streams a
+running agent and charts its KV-cache curve. `castle build "<goal>"` runs a
+spec-driven pipeline: understand → decompose → write+audit acceptance tests →
+develop in parallel git worktrees → loop until the tests pass.
+
+![dashboard](docs/dashboard.png)
+
+## Quickstart
+
+```bash
+bun install
+cp .env.example .env      # then paste your DEEPSEEK_API_KEY
+bun run bin/castle.ts run "summarize what this project does, then list its source files"
+bun run bin/castle.ts trace .castle/traces/<run>.jsonl    # analyze a run
+bun run bin/castle.ts serve                               # web dashboard on :3000
+```
+
+Flags: `--model <id>` (default `deepseek-chat`), `--max-steps <n>`,
+`--context-budget <tokens>`, `--no-compact`, `--dry-run`.
+
+## Architecture
+
+The core is intentionally **presentation-free and SDK-isolated**. The agent loop
+is the only code coupled to the model SDK; everything upstream speaks one
+`AgentEvent` stream, so the terminal renderer, the web dashboard, and the eval
+runner are all just consumers of the same events.
+
+```
+src/
+├── core/
+│   ├── agent.ts      # the agent loop → AsyncGenerator<AgentEvent>
+│   ├── events.ts     # AgentEvent union + token accounting (KV-cache aware)
+│   ├── model.ts      # DeepSeek via the OpenAI-compatible Chat Completions API
+│   ├── prompt.ts     # the static, cache-stable system prefix
+│   ├── context.ts    # context manager: budget, turn-safe compaction
+│   ├── summarize.ts  # model-backed summarizer used by compaction
+│   ├── analysis.ts   # fold an event stream → run metrics (CLI + web share it)
+│   ├── subagent.ts   # context-isolated subagents: think() + work()
+│   └── trace.ts      # append-only JSONL tracer (one file per run)
+├── tools/            # bash + read/write/edit/list — the agent's hands
+├── build/            # spec-driven pipeline: schemas · graph · worktree · orchestrator
+├── server/           # Bun.serve: JSON API + WebSocket live-run streaming
+├── render.ts         # terminal renderer for the event stream
+└── commands/         # run · trace · serve · build
+web/                  # React dashboard (hand-rolled SVG cache chart, no chart dep)
+```
+
+### Design notes
+
+- **The loop is a seam, not a black box.** `runAgent` consumes the SDK's raw
+  stream and re-emits harness events. Swapping the model or the frontend never
+  touches the other side.
+- **KV cache is a first-class metric.** `Usage` surfaces `cachedInputTokens`, and
+  the system prompt is kept a byte-stable prefix so prompt-prefix cache hits are
+  possible at all. Every run prints its cache-hit rate.
+- **Tool output is bounded.** A noisy command can't blow up the context window;
+  output is truncated with an explicit marker.
+
+## Context engineering (P2)
+
+Two independent levers, kept distinct on purpose:
+
+**Lever A — a cache-stable prefix.** Under budget, the context manager returns the
+message window *untouched*. Nothing earlier is rewritten, so the prompt prefix is
+byte-identical to the previous step and DeepSeek's prefix cache hits on it. The
+system prompt is deliberately static for the same reason.
+
+**Lever B — turn-safe compaction.** When the estimated window exceeds a token
+budget, the manager pins the task and the most recent turns, and replaces the
+middle with a model-written summary. Compaction only ever cuts on *turn*
+boundaries, so an `assistant` tool call and the `tool` results it produced always
+move together — never a dangling tool result. This bounds the window on long runs
+at the cost of a one-time cache reset.
+
+These pull in opposite directions, and the harness measures the trade-off rather
+than hiding it. A real 10-step run (`--context-budget 2500`), read back with
+`castle trace`:
+
+```
+  step   input   cached   hit%    output
+     1    1073      896    84%        44
+     2    1155     1024    89%        47     ← append-only: prefix cache hits
+     5    4166     3584    86%        48
+     6    4652     1024    22%        49     ← cache reset right after a compaction
+     7    4098     1024    25%        52
+    10    3321     3200    96%       135
+
+  compactions:
+    ⟲ 2 turns · 4289 → 3313 tokens
+    ⟲ 2 turns · 3688 → 2386 tokens
+  total: input=30812 cached=16256 (53% hit)
+```
+
+Input tokens plateau around 3–4k instead of growing unbounded with step count
+(the win from Lever B); cache-hit stays high while appending and dips right after
+each compaction (the cost of Lever B, and the reason Lever A leaves history
+alone whenever it can). Toggle it with `--no-compact` to see the window grow.
+
+## Dashboard (P4)
+
+`castle serve` starts a `Bun.serve()` app (no Vite; HTML imports bundle the React
+frontend) with three surfaces:
+
+- a JSON API over recorded traces (`/api/runs`, `/api/runs/:id`),
+- a **WebSocket that live-streams a running agent**, and
+- a React UI that charts the per-step KV-cache curve and renders the timeline.
+
+The point is the seam: the browser consumes the *same* `AgentEvent` stream the
+terminal renderer does, and both the live view and the historical view fold that
+stream through one `summarizeEvents()` — so a run looks identical whether it's
+watched in real time or replayed from disk. The cache chart is hand-drawn SVG
+(cached vs uncached tokens per step, hit-% line on top), no chart dependency.
+
+## Spec-driven build (P5)
+
+`castle build "<goal>"` is an orchestration layer over the single agent loop. Its
+premise: **the loop terminates when acceptance tests pass, not when the model says
+it's done.** Five phases:
+
+1. **Understand** — expand a vague goal into a precise intent; *pessimistically*
+   ask the user to confirm when confidence is low (or `--yes` to proceed on
+   logged assumptions).
+2. **Decompose** — break it into atomic, testable tasks with a dependency graph;
+   `toWaves()` turns the DAG into parallel waves.
+3. **Acceptance tests + audit** — a subagent writes tests (TDD, red first); then a
+   **context-isolated auditor** — a fresh subagent that never saw the test-writer's
+   reasoning — judges whether they really verify the criteria or could false-pass.
+4. **Develop** — each task builds in its own **git worktree**, tasks in a wave run
+   in parallel, branches merge back (disjoint files → clean merges).
+5. **Acceptance** — run the tests; failing tasks get bounded fix attempts; whatever
+   still fails is reported honestly, not hidden.
+
+This is where the harness's **Subagent / Multi-Agent / Planning** live. Subagents
+(`src/core/subagent.ts`) are the unit of context isolation: `think()` for
+structured one-shot calls, `work()` for full agentic sub-runs. The auditor's
+isolation is the point — the agent can't mark its own homework.
+
+A real autonomous run (`castle build "…string-utils library…" --yes`) decomposed
+into 4 tasks / 2 waves, wrote and audited acceptance tests, developed 3 tasks in
+parallel worktrees, merged, and passed 4/4 acceptance (independently re-verified
+with `bun test`: 21 pass).
+
+## Roadmap
+
+| Phase | Focus |
+|-------|-------|
+| **P0** ✅ | Agent loop, tool suite, streaming, per-run trace |
+| **P2** ✅ | Context engineering: turn-safe compaction, KV-cache-stable prefixes, `castle trace` measurement |
+| **P4** ✅ | `Bun.serve` API + WebSocket live-run + React dashboard with SVG cache chart |
+| **P5** ✅ | `castle build`: subagents, context-isolated test audit, worktree parallel dev, acceptance-gated loop |
+| P1 | Tool permissions & risk model, richer file tools |
+| P3 | Textual-style TUI |
+| P5+ | MCP client, persistent memory, skills |
+| P6 | Eval harness on real tasks (success rate / tokens / cost / cache hit) |
+
+## Development
+
+```bash
+bun test            # unit tests (tools, usage mapping, truncation)
+bun run typecheck   # tsc --noEmit
+```
