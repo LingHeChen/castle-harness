@@ -12,6 +12,7 @@ export type BuildOptions = {
   model?: string;
   autonomous: boolean; // skip interactive clarification, proceed on assumptions
   maxFixAttempts: number;
+  maxAuditAttempts: number; // times an auditor can send weak tests back to be rewritten
   confidenceThreshold: number;
   emit: BuildEmit;
   /** Interactive clarification callback (CLI). Omitted → treated as autonomous. */
@@ -103,47 +104,62 @@ async function decompose(intent: Intent, opts: BuildOptions): Promise<Task[]> {
   return tasks;
 }
 
-// ── Phase 3: Acceptance tests + isolated audit ───────────────────────
+// ── Phase 3: Acceptance tests + isolated audit (with revise loop) ────
 async function writeAndAuditTests(tasks: Task[], opts: BuildOptions): Promise<void> {
   opts.emit({ type: "phase", n: 3, title: "acceptance tests + audit" });
-  for (const t of tasks) {
-    opts.emit({ type: "task-status", taskId: t.id, status: "testing" });
-    const testPath = `${TEST_DIR}/${t.id}.test.ts`;
-    await work(
-      `Write acceptance tests ONLY (do not implement the feature) for this task, at ${testPath}.\n\n` +
-        `Task: ${t.title}\n${t.description}\n\nAcceptance criteria:\n${t.acceptanceCriteria.map((c) => `- ${c}`).join("\n")}\n\n` +
-        `Files the implementation will live in: ${t.files.join(", ")}. Import from there. ` +
-        `Use bun:test. Each criterion must be a real assertion. The tests should FAIL now (no implementation yet).`,
-      {
-        cwd: opts.cwd,
-        model: opts.model,
-        maxSteps: 12,
-        tracer: new Tracer(".castle/traces", `build-test-${t.id}`),
-        system:
-          "You are a test engineer practising TDD. You write acceptance tests that pin down behaviour. " +
-          "You never write implementation code — only tests. Encode every acceptance criterion as a concrete assertion.",
-        onEvent: (ev) => emitActivity(opts, t.id, "test", ev),
-      },
-    );
+  for (const t of tasks) await writeAndAuditOne(t, opts);
+}
 
-    // Context-isolated auditor: sees only the task + the test file, never the writer's reasoning.
-    const testCode = await Bun.file(`${opts.cwd}/${testPath}`).text().catch(() => "");
-    if (!testCode) {
-      opts.emit({ type: "audit", taskId: t.id, sound: false, canFalsePass: true, issues: [`no test file at ${testPath}`] });
-      continue;
-    }
-    const verdict = await think({
-      model: opts.model,
-      schema: AuditVerdictSchema,
-      system:
-        "You are an adversarial test auditor with NO prior context. Given a task's acceptance criteria " +
-        "and its test code, judge whether the tests genuinely verify the criteria and whether they could " +
-        "FALSE-PASS without a correct implementation (tautological assertions, mocked-away logic, happy-path only).",
-      prompt: `Acceptance criteria:\n${t.acceptanceCriteria.join("\n")}\n\nTest code (${testPath}):\n${testCode}`,
-    });
+async function writeAndAuditOne(t: Task, opts: BuildOptions): Promise<void> {
+  const testPath = `${TEST_DIR}/${t.id}.test.ts`;
+  const criteria = t.acceptanceCriteria.map((c) => `- ${c}`).join("\n");
+  const testerSystem =
+    "You are a test engineer practising TDD. You write acceptance tests that pin down behaviour. " +
+    "You never write implementation code — only tests. Encode every acceptance criterion as a concrete assertion.";
+
+  opts.emit({ type: "task-status", taskId: t.id, status: "testing" });
+  await work(
+    `Write acceptance tests ONLY (do not implement the feature) for this task, at ${testPath}.\n\n` +
+      `Task: ${t.title}\n${t.description}\n\nAcceptance criteria:\n${criteria}\n\n` +
+      `Files the implementation will live in: ${t.files.join(", ")}. Import from there. ` +
+      `Use bun:test. Each criterion must be a real assertion. The tests should FAIL now (no implementation yet).`,
+    { cwd: opts.cwd, model: opts.model, maxSteps: 12, tracer: new Tracer(".castle/traces", `build-test-${t.id}`), system: testerSystem, onEvent: (ev) => emitActivity(opts, t.id, "test", ev) },
+  );
+
+  let verdict = await auditTests(t, testPath, opts);
+  opts.emit({ type: "audit", taskId: t.id, sound: verdict.sound, canFalsePass: verdict.canFalsePass, issues: verdict.issues });
+
+  // Revise loop: the auditor's a gate, not a comment. Weak tests get sent back.
+  let attempt = 0;
+  while ((!verdict.sound || verdict.canFalsePass) && attempt < opts.maxAuditAttempts) {
+    attempt++;
+    opts.emit({ type: "task-status", taskId: t.id, status: "revising", detail: `audit attempt ${attempt}` });
+    await work(
+      `An independent auditor flagged your acceptance tests at ${testPath} as weak. Strengthen them so they ` +
+        `genuinely verify the criteria and cannot false-pass. Keep them tests only (no implementation).\n\n` +
+        `Acceptance criteria:\n${criteria}\n\nAuditor issues:\n${verdict.issues.map((i) => `- ${i}`).join("\n")}\n` +
+        `Auditor suggestions:\n${verdict.suggestions.map((s) => `- ${s}`).join("\n")}`,
+      { cwd: opts.cwd, model: opts.model, maxSteps: 12, tracer: new Tracer(".castle/traces", `build-test-${t.id}-rev${attempt}`), system: testerSystem, onEvent: (ev) => emitActivity(opts, t.id, "revise", ev) },
+    );
+    verdict = await auditTests(t, testPath, opts);
     opts.emit({ type: "audit", taskId: t.id, sound: verdict.sound, canFalsePass: verdict.canFalsePass, issues: verdict.issues });
-    opts.emit({ type: "task-status", taskId: t.id, status: "audited" });
   }
+  opts.emit({ type: "task-status", taskId: t.id, status: "audited" });
+}
+
+/** Context-isolated auditor: sees only the task + the test file, never the writer's reasoning. */
+async function auditTests(t: Task, testPath: string, opts: BuildOptions) {
+  const testCode = await Bun.file(`${opts.cwd}/${testPath}`).text().catch(() => "");
+  if (!testCode) return { sound: false, canFalsePass: true, issues: [`no test file at ${testPath}`], suggestions: [] };
+  return await think({
+    model: opts.model,
+    schema: AuditVerdictSchema,
+    system:
+      "You are an adversarial test auditor with NO prior context. Given a task's acceptance criteria " +
+      "and its test code, judge whether the tests genuinely verify the criteria and whether they could " +
+      "FALSE-PASS without a correct implementation (tautological assertions, mocked-away logic, happy-path only).",
+    prompt: `Acceptance criteria:\n${t.acceptanceCriteria.join("\n")}\n\nTest code (${testPath}):\n${testCode}`,
+  });
 }
 
 // ── Phase 4: Parallel development in worktrees ───────────────────────

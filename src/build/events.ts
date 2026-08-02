@@ -14,6 +14,7 @@ export type BuildTask = {
 export type TaskStatus =
   | "pending"
   | "testing"
+  | "revising"
   | "audited"
   | "developing"
   | "merged"

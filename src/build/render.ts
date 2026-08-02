@@ -31,6 +31,7 @@ export function renderBuildEvent(ev: BuildEvent): void {
       break;
     case "task-status": {
       const marks: Record<string, string> = {
+        revising: `  ${C.yellow}↻ ${ev.taskId}: tests flagged, rewriting (${ev.detail ?? ""})${C.reset}`,
         merged: `  ${C.green}merged ${ev.taskId}${C.reset}`,
         "merge-conflict": `  ${C.red}✗ merge conflict on ${ev.taskId}${C.reset}${ev.detail ? `: ${ev.detail}` : ""}`,
         passing: `  ${C.green}✓ ${ev.taskId}${C.reset}`,

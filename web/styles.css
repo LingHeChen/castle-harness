@@ -151,6 +151,7 @@ body {
 .dag-act { fill: var(--accent); font: 10px var(--mono); }
 .status-developing rect { stroke: var(--yellow); fill: rgba(210,153,34,0.12); }
 .status-testing rect, .status-audited rect { stroke: var(--accent); }
+.status-revising rect { stroke: #d29922; fill: rgba(210,153,34,0.10); stroke-dasharray: 5 3; }
 .status-fixing rect { stroke: #db6d28; fill: rgba(219,109,40,0.12); }
 .status-merged rect { stroke: #39c5cf; }
 .status-passing rect { stroke: var(--green); fill: rgba(63,185,80,0.14); }

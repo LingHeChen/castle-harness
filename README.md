@@ -21,7 +21,8 @@ and a per-run JSONL trace. `castle trace <file>` reconstructs the token/cache
 economics of any run. `castle serve` opens a React dashboard that live-streams a
 running agent and charts its KV-cache curve. `castle build "<goal>"` runs a
 spec-driven pipeline: understand → decompose → write+audit acceptance tests →
-develop in parallel git worktrees → loop until the tests pass.
+develop in parallel git worktrees → loop until the tests pass. The agent also has
+persistent memory, on-demand skills, and a hand-rolled MCP client.
 
 ![dashboard](docs/dashboard.png)
 
@@ -56,8 +57,11 @@ src/
 │   ├── summarize.ts  # model-backed summarizer used by compaction
 │   ├── analysis.ts   # fold an event stream → run metrics (CLI + web share it)
 │   ├── subagent.ts   # context-isolated subagents: think() + work()
+│   ├── memory.ts     # persistent per-project agent memory
+│   ├── skills.ts     # progressive-disclosure skill catalogue
+│   ├── mcp.ts        # hand-rolled MCP stdio client (JSON-RPC)
 │   └── trace.ts      # append-only JSONL tracer (one file per run)
-├── tools/            # bash + read/write/edit/list — the agent's hands
+├── tools/            # bash · read/write/edit/list · remember · load_skill
 ├── build/            # spec-driven pipeline: schemas · graph · worktree · orchestrator
 ├── server/           # Bun.serve: JSON API + WebSocket live-run streaming
 ├── render.ts         # terminal renderer for the event stream
@@ -170,6 +174,29 @@ is one click away in the runs list.
 
 ![live build DAG](docs/build-dag-done.png)
 
+The auditor is a **gate, not a comment**: when it flags tests as weak or
+false-passable, they're sent back to a fresh test-writer with the specific issues,
+re-audited, and only then accepted (`--audit-attempts`).
+
+## Memory, skills, MCP
+
+Three ways the harness augments the agent's context, all loaded once at run start
+so they sit in the stable prompt prefix:
+
+- **Memory** (`.castle/memory.md`) — persistent per-project notes. Loaded into the
+  system prompt; the agent appends to it with the `remember` tool. Survives across
+  runs, so a fact learned once is there next time.
+- **Skills** (`.castle/skills/*.md`) — named instruction bundles with frontmatter.
+  Only their *names and descriptions* sit in context; the full body loads on
+  demand via `load_skill`. Progressive disclosure keeps always-on context small.
+- **MCP** (`.castle/mcp.json`) — a hand-rolled Model Context Protocol client over
+  stdio (newline-delimited JSON-RPC: `initialize` → `tools/list` → `tools/call`).
+  Each server's tools are proxied into the registry as `mcp__<server>__<tool>`, so
+  to the loop an MCP tool is just another tool.
+
+Verified in one run: the agent called an `mcp__demo__echo` tool, `load_skill`-ed a
+skill and followed it, and `remember`-ed a fact that persisted to disk.
+
 ## Roadmap
 
 | Phase | Focus |
@@ -177,10 +204,10 @@ is one click away in the runs list.
 | **P0** ✅ | Agent loop, tool suite, streaming, per-run trace |
 | **P2** ✅ | Context engineering: turn-safe compaction, KV-cache-stable prefixes, `castle trace` measurement |
 | **P4** ✅ | `Bun.serve` API + WebSocket live-run + React dashboard with SVG cache chart |
-| **P5** ✅ | `castle build`: subagents, context-isolated test audit, worktree parallel dev, acceptance-gated loop |
+| **P5** ✅ | `castle build`: subagents, context-isolated test audit (revise-loop gate), worktree parallel dev, acceptance-gated loop |
+| **P5+** ✅ | Persistent memory, progressive-disclosure skills, hand-rolled MCP stdio client |
 | P1 | Tool permissions & risk model, richer file tools |
 | P3 | Textual-style TUI |
-| P5+ | MCP client, persistent memory, skills |
 | P6 | Eval harness on real tasks (success rate / tokens / cost / cache hit) |
 
 ## Development

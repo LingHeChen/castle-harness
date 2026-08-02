@@ -5,6 +5,9 @@ import { SYSTEM_PROMPT } from "./prompt";
 import { toUsage, type AgentEvent } from "./events";
 import { ContextManager } from "./context";
 import { createSummarizer } from "./summarize";
+import { loadMemory } from "./memory";
+import { listSkills, type Skill } from "./skills";
+import { connectConfiguredMcp } from "./mcp";
 import type { Tracer } from "./trace";
 
 export type AgentOptions = {
@@ -31,7 +34,17 @@ export type AgentOptions = {
  */
 export async function* runAgent(task: string, opts: AgentOptions): AsyncGenerator<AgentEvent> {
   const model = createModel(resolveModelConfig(opts.model));
-  const tools = buildTools({ cwd: opts.cwd, tracer: opts.tracer });
+
+  // Load persistent memory + available skills once, at run start. Both become a
+  // stable part of the prompt prefix for this run (cache-friendly); skills use
+  // progressive disclosure — only names/descriptions here, bodies load on demand.
+  const [memory, skills] = await Promise.all([loadMemory(opts.cwd), listSkills(opts.cwd)]);
+  const system = augmentSystem(opts.system ?? SYSTEM_PROMPT, memory, skills);
+
+  // Connect any MCP servers configured in .castle/mcp.json; their tools join the
+  // registry namespaced mcp__<server>__<tool>. Closed in the finally below.
+  const mcp = await connectConfiguredMcp(opts.cwd);
+  const tools = { ...buildTools({ cwd: opts.cwd, tracer: opts.tracer, skills }), ...mcp.tools };
 
   // Context engineering: compact the message window when it grows past budget.
   const context =
@@ -46,9 +59,10 @@ export async function* runAgent(task: string, opts: AgentOptions): AsyncGenerato
   // Track when each tool call started so we can report execution latency.
   const started = new Map<string, number>();
 
+  try {
   const result = streamText({
     model,
-    system: opts.system ?? SYSTEM_PROMPT,
+    system,
     prompt: task,
     tools,
     stopWhen: stepCountIs(opts.maxSteps),
@@ -118,6 +132,20 @@ export async function* runAgent(task: string, opts: AgentOptions): AsyncGenerato
   const done = toUsage(usage);
   opts.tracer.final(done);
   yield emit({ type: "done", text, usage: done });
+  } finally {
+    mcp.close();
+  }
+}
+
+/** Fold persistent memory and the skill catalogue into the system prompt. */
+function augmentSystem(base: string, memory: string, skills: Skill[]): string {
+  let out = base;
+  if (memory) out += `\n\n## Project memory\n${memory}`;
+  if (skills.length > 0) {
+    const list = skills.map((s) => `- ${s.name}: ${s.description}`).join("\n");
+    out += `\n\n## Available skills\nUse the load_skill tool to read a skill's full instructions when relevant.\n${list}`;
+  }
+  return out;
 }
 
 function stringifyOutput(output: unknown): string {

@@ -72,6 +72,7 @@ async function streamBuild(ws: ServerWebSocket<WsData>, msg: BuildMsg): Promise<
       model: msg.model,
       autonomous: true, // the browser can't answer clarification prompts
       maxFixAttempts: msg.fixAttempts ?? 2,
+      maxAuditAttempts: 1,
       confidenceThreshold: 0.75,
       emit: (ev) => ws.send(JSON.stringify(ev)),
     });
