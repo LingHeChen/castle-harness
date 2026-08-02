@@ -1,6 +1,7 @@
 import type { Server, ServerWebSocket } from "bun";
 import index from "../../web/index.html";
 import { runAgent } from "../core/agent";
+import { build } from "../build/orchestrator";
 import { Tracer } from "../core/trace";
 import { listRuns, getRun } from "./runs";
 
@@ -31,7 +32,7 @@ export function startServer(port: number): Server<WsData> {
 
     fetch(req, server) {
       const url = new URL(req.url);
-      if (url.pathname === "/ws/run") {
+      if (url.pathname === "/ws/run" || url.pathname === "/ws/build") {
         return server.upgrade(req, { data: { running: false } })
           ? undefined
           : new Response("expected websocket", { status: 426 });
@@ -41,19 +42,45 @@ export function startServer(port: number): Server<WsData> {
 
     websocket: {
       message(ws: ServerWebSocket<WsData>, raw) {
-        let msg: { type?: string; task?: string; maxSteps?: number; compact?: boolean; contextBudget?: number };
+        let msg: BuildMsg & RunMsg;
         try {
           msg = JSON.parse(String(raw));
         } catch {
           return;
         }
-        if (msg.type !== "start" || !msg.task) return;
         if (ws.data.running) return;
-        ws.data.running = true;
-        void streamRun(ws, msg);
+        if (msg.type === "start" && msg.task) {
+          ws.data.running = true;
+          void streamRun(ws, msg);
+        } else if (msg.type === "build" && msg.goal) {
+          ws.data.running = true;
+          void streamBuild(ws, msg);
+        }
       },
     },
   });
+}
+
+type RunMsg = { type?: string; task?: string; maxSteps?: number; compact?: boolean; contextBudget?: number };
+type BuildMsg = { type?: string; goal?: string; model?: string; fixAttempts?: number };
+
+async function streamBuild(ws: ServerWebSocket<WsData>, msg: BuildMsg): Promise<void> {
+  ws.send(JSON.stringify({ type: "build-started" }));
+  try {
+    await build(msg.goal!, {
+      cwd: process.cwd(),
+      model: msg.model,
+      autonomous: true, // the browser can't answer clarification prompts
+      maxFixAttempts: msg.fixAttempts ?? 2,
+      confidenceThreshold: 0.75,
+      emit: (ev) => ws.send(JSON.stringify(ev)),
+    });
+  } catch (err) {
+    ws.send(JSON.stringify({ type: "error", message: (err as Error).message }));
+  } finally {
+    ws.data.running = false;
+    ws.send(JSON.stringify({ type: "build-ended" }));
+  }
 }
 
 async function streamRun(

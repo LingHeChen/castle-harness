@@ -157,6 +157,16 @@ into 4 tasks / 2 waves, wrote and audited acceptance tests, developed 3 tasks in
 parallel worktrees, merged, and passed 4/4 acceptance (independently re-verified
 with `bun test`: 21 pass).
 
+The whole pipeline also streams to the dashboard over a WebSocket (`/ws/build`):
+the orchestrator emits a `BuildEvent` stream that lights up a live task DAG —
+columns are concurrency waves, nodes colour by state (testing → developing →
+merged → passing), edges are dependencies. Same "emit events, many consumers"
+discipline as the agent loop; the CLI renderer and the browser fold the same
+stream. Every subagent also writes its own trace, so each node's KV-cache curve
+is one click away in the runs list.
+
+![live build DAG](docs/build-dag-done.png)
+
 ## Roadmap
 
 | Phase | Focus |

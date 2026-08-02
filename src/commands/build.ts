@@ -1,5 +1,6 @@
 import { Option, Command, type Usage } from "clipanion";
 import { build } from "../build/orchestrator";
+import { renderBuildEvent } from "../build/render";
 
 export class BuildCommand extends Command {
   static override paths = [["build"]];
@@ -22,20 +23,14 @@ export class BuildCommand extends Command {
       autonomous: this.yes,
       maxFixAttempts: Number.parseInt(this.fixAttempts, 10) || 2,
       confidenceThreshold: Number.parseFloat(this.confidence) || 0.75,
+      emit: renderBuildEvent,
+      ask: this.yes ? undefined : (q, why) => prompt(`\n? ${q}\n  (why: ${why})\n> `),
     }).catch((err) => {
       this.context.stderr.write(`\x1b[31mbuild failed:\x1b[0m ${(err as Error).message}\n`);
       return null;
     });
 
     if (!outcomes) return 1;
-
-    const passed = outcomes.filter((o) => o.passed);
-    this.context.stdout.write(`\n\x1b[1m━━ report ━━\x1b[0m\n`);
-    for (const o of outcomes) {
-      const mark = o.passed ? "\x1b[32m✓\x1b[0m" : "\x1b[31m✗\x1b[0m";
-      this.context.stdout.write(`${mark} ${o.task.id} — ${o.detail.split("\n")[0]}\n`);
-    }
-    this.context.stdout.write(`\n${passed.length}/${outcomes.length} tasks passed acceptance.\n`);
-    return passed.length === outcomes.length ? 0 : 1;
+    return outcomes.every((o) => o.passed) ? 0 : 1;
   }
 }

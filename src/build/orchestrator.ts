@@ -5,7 +5,7 @@ import type { AgentEvent } from "../core/events";
 import { IntentSchema, TaskGraphSchema, AuditVerdictSchema, type Intent, type Task } from "./schemas";
 import { toWaves } from "./graph";
 import { isGitRepo, ensureCommitted, addWorktree, mergeWorktree, removeWorktree } from "./worktree";
-import { log, phase, sub } from "./log";
+import type { BuildEmit } from "./events";
 
 export type BuildOptions = {
   cwd: string;
@@ -13,14 +13,18 @@ export type BuildOptions = {
   autonomous: boolean; // skip interactive clarification, proceed on assumptions
   maxFixAttempts: number;
   confidenceThreshold: number;
+  emit: BuildEmit;
+  /** Interactive clarification callback (CLI). Omitted → treated as autonomous. */
+  ask?: (question: string, why: string) => string | null;
 };
 
 export type TaskOutcome = { task: Task; passed: boolean; attempts: number; detail: string };
 
 const TEST_DIR = "acceptance";
 
-/** The full plan→test→build→verify pipeline. */
+/** The full plan→test→build→verify pipeline. Emits {@link BuildEvent}s throughout. */
 export async function build(goal: string, opts: BuildOptions): Promise<TaskOutcome[]> {
+  const { emit } = opts;
   if (!(await isGitRepo(opts.cwd))) {
     throw new Error("castle build needs a git repository (worktrees are used for parallel dev). Run `git init` first.");
   }
@@ -28,19 +32,30 @@ export async function build(goal: string, opts: BuildOptions): Promise<TaskOutco
   const intent = await understand(goal, opts);
   const tasks = await decompose(intent, opts);
   const waves = toWaves(tasks);
-  log(`Decomposed into ${tasks.length} tasks across ${waves.length} waves.`);
+  emit({
+    type: "graph",
+    tasks: tasks.map((t) => ({ id: t.id, title: t.title, dependsOn: t.dependsOn, files: t.files })),
+    waves: waves.map((w) => w.map((t) => t.id)),
+  });
+  emit({ type: "log", message: `Decomposed into ${tasks.length} tasks across ${waves.length} waves.` });
 
   await writeAndAuditTests(tasks, opts);
   await ensureCommitted(opts.cwd, "castle: acceptance tests");
 
   await develop(waves, opts);
 
-  return await accept(tasks, opts);
+  const outcomes = await accept(tasks, opts);
+  emit({
+    type: "report",
+    outcomes: outcomes.map((o) => ({ id: o.task.id, passed: o.passed, attempts: o.attempts, detail: o.detail })),
+  });
+  emit({ type: "done" });
+  return outcomes;
 }
 
 // ── Phase 1: Understand ──────────────────────────────────────────────
 async function understand(goal: string, opts: BuildOptions): Promise<Intent> {
-  phase("1 · understand");
+  opts.emit({ type: "phase", n: 1, title: "understand" });
   const intent = await think({
     model: opts.model,
     schema: IntentSchema,
@@ -51,22 +66,21 @@ async function understand(goal: string, opts: BuildOptions): Promise<Intent> {
     prompt: `User goal:\n${goal}`,
   });
 
-  log(`intent: ${intent.expandedIntent}`);
-  if (intent.assumptions.length) log(`assumptions:\n${intent.assumptions.map((a) => `  · ${a}`).join("\n")}`);
+  const needsClarification = intent.confidence < opts.confidenceThreshold || intent.clarifications.length > 0;
+  opts.emit({
+    type: "intent",
+    expandedIntent: intent.expandedIntent,
+    assumptions: intent.assumptions,
+    confidence: intent.confidence,
+    needsClarification,
+  });
 
-  const uncertain = intent.confidence < opts.confidenceThreshold || intent.clarifications.length > 0;
-  if (!uncertain) return intent;
-
-  log(`confidence ${Math.round(intent.confidence * 100)}% — clarification needed`);
-  if (opts.autonomous) {
-    log("autonomous mode: proceeding on the assumptions above (not confirmed).");
-    return intent;
-  }
+  if (!needsClarification || opts.autonomous || !opts.ask) return intent;
 
   // Interactive: ask the user, fold answers into the intent.
   const answers: string[] = [];
   for (const c of intent.clarifications) {
-    const ans = prompt(`\n? ${c.question}\n  (why: ${c.why})\n> `);
+    const ans = opts.ask(c.question, c.why);
     if (ans && ans.trim()) answers.push(`Q: ${c.question}\nA: ${ans.trim()}`);
   }
   if (answers.length === 0) return intent;
@@ -75,7 +89,7 @@ async function understand(goal: string, opts: BuildOptions): Promise<Intent> {
 
 // ── Phase 2: Decompose ───────────────────────────────────────────────
 async function decompose(intent: Intent, opts: BuildOptions): Promise<Task[]> {
-  phase("2 · decompose");
+  opts.emit({ type: "phase", n: 2, title: "decompose" });
   const { tasks } = await think({
     model: opts.model,
     schema: TaskGraphSchema,
@@ -86,17 +100,14 @@ async function decompose(intent: Intent, opts: BuildOptions): Promise<Task[]> {
       "MUST NOT share files. Prefer more small tasks over few large ones.",
     prompt: `Intent:\n${intent.expandedIntent}\n\nAssumptions:\n${intent.assumptions.join("\n")}`,
   });
-
-  for (const t of tasks) {
-    log(`· ${t.id}${t.dependsOn.length ? ` (after ${t.dependsOn.join(", ")})` : ""} — ${t.title}`);
-  }
   return tasks;
 }
 
 // ── Phase 3: Acceptance tests + isolated audit ───────────────────────
 async function writeAndAuditTests(tasks: Task[], opts: BuildOptions): Promise<void> {
-  phase("3 · acceptance tests + audit");
+  opts.emit({ type: "phase", n: 3, title: "acceptance tests + audit" });
   for (const t of tasks) {
+    opts.emit({ type: "task-status", taskId: t.id, status: "testing" });
     const testPath = `${TEST_DIR}/${t.id}.test.ts`;
     await work(
       `Write acceptance tests ONLY (do not implement the feature) for this task, at ${testPath}.\n\n` +
@@ -111,14 +122,14 @@ async function writeAndAuditTests(tasks: Task[], opts: BuildOptions): Promise<vo
         system:
           "You are a test engineer practising TDD. You write acceptance tests that pin down behaviour. " +
           "You never write implementation code — only tests. Encode every acceptance criterion as a concrete assertion.",
-        onEvent: (ev) => printSub(t.id, "test", ev),
+        onEvent: (ev) => emitActivity(opts, t.id, "test", ev),
       },
     );
 
     // Context-isolated auditor: sees only the task + the test file, never the writer's reasoning.
     const testCode = await Bun.file(`${opts.cwd}/${testPath}`).text().catch(() => "");
     if (!testCode) {
-      log(`  ! ${t.id}: no test file produced at ${testPath}`);
+      opts.emit({ type: "audit", taskId: t.id, sound: false, canFalsePass: true, issues: [`no test file at ${testPath}`] });
       continue;
     }
     const verdict = await think({
@@ -130,20 +141,21 @@ async function writeAndAuditTests(tasks: Task[], opts: BuildOptions): Promise<vo
         "FALSE-PASS without a correct implementation (tautological assertions, mocked-away logic, happy-path only).",
       prompt: `Acceptance criteria:\n${t.acceptanceCriteria.join("\n")}\n\nTest code (${testPath}):\n${testCode}`,
     });
-    const flag = verdict.sound && !verdict.canFalsePass ? "✓ sound" : "⚠ weak";
-    log(`  audit ${t.id}: ${flag}${verdict.issues.length ? ` — ${verdict.issues.join("; ")}` : ""}`);
+    opts.emit({ type: "audit", taskId: t.id, sound: verdict.sound, canFalsePass: verdict.canFalsePass, issues: verdict.issues });
+    opts.emit({ type: "task-status", taskId: t.id, status: "audited" });
   }
 }
 
 // ── Phase 4: Parallel development in worktrees ───────────────────────
 async function develop(waves: Task[][], opts: BuildOptions): Promise<void> {
-  phase("4 · develop (parallel, worktree-isolated)");
+  opts.emit({ type: "phase", n: 4, title: "develop (parallel, worktree-isolated)" });
   for (let w = 0; w < waves.length; w++) {
     const wave = waves[w]!;
-    log(`wave ${w + 1}: ${wave.map((t) => t.id).join(", ")}`);
+    opts.emit({ type: "wave", index: w + 1, taskIds: wave.map((t) => t.id) });
 
     const built = await Promise.all(
       wave.map(async (t) => {
+        opts.emit({ type: "task-status", taskId: t.id, status: "developing" });
         const wt = await addWorktree(opts.cwd, t.id);
         await work(
           `Implement this task so its acceptance tests pass. Run \`bun test ${TEST_DIR}/${t.id}.test.ts\` to check.\n\n` +
@@ -154,7 +166,7 @@ async function develop(waves: Task[][], opts: BuildOptions): Promise<void> {
             model: opts.model,
             maxSteps: 30,
             tracer: new Tracer(".castle/traces", `build-dev-${t.id}`),
-            onEvent: (ev) => printSub(t.id, "dev", ev),
+            onEvent: (ev) => emitActivity(opts, t.id, "dev", ev),
           },
         );
         return { task: t, wt };
@@ -164,7 +176,12 @@ async function develop(waves: Task[][], opts: BuildOptions): Promise<void> {
     // Merge sequentially (single index on the main tree); disjoint files → clean.
     for (const { task, wt } of built) {
       const res = await mergeWorktree(opts.cwd, wt);
-      log(res.merged ? `  merged ${task.id}` : `  ✗ merge conflict on ${task.id}: ${res.reason}`);
+      opts.emit({
+        type: "task-status",
+        taskId: task.id,
+        status: res.merged ? "merged" : "merge-conflict",
+        detail: res.reason,
+      });
       await removeWorktree(opts.cwd, wt);
     }
   }
@@ -172,7 +189,7 @@ async function develop(waves: Task[][], opts: BuildOptions): Promise<void> {
 
 // ── Phase 5: Acceptance + honest reporting ───────────────────────────
 async function accept(tasks: Task[], opts: BuildOptions): Promise<TaskOutcome[]> {
-  phase("5 · acceptance");
+  opts.emit({ type: "phase", n: 5, title: "acceptance" });
   const outcomes: TaskOutcome[] = [];
 
   for (const t of tasks) {
@@ -181,7 +198,7 @@ async function accept(tasks: Task[], opts: BuildOptions): Promise<TaskOutcome[]>
 
     while (!result.pass && attempt < opts.maxFixAttempts) {
       attempt++;
-      log(`  ${t.id}: failing, fix attempt ${attempt}/${opts.maxFixAttempts}`);
+      opts.emit({ type: "task-status", taskId: t.id, status: "fixing", detail: `attempt ${attempt}/${opts.maxFixAttempts}` });
       await work(
         `The acceptance tests for this task are failing. Fix the IMPLEMENTATION (never the tests) so ` +
           `\`bun test ${TEST_DIR}/${t.id}.test.ts\` passes.\n\nTask: ${t.title}\n\nTest output:\n${result.output}`,
@@ -190,19 +207,14 @@ async function accept(tasks: Task[], opts: BuildOptions): Promise<TaskOutcome[]>
           model: opts.model,
           maxSteps: 25,
           tracer: new Tracer(".castle/traces", `build-fix-${t.id}-${attempt}`),
-          onEvent: (ev) => printSub(t.id, "fix", ev),
+          onEvent: (ev) => emitActivity(opts, t.id, "fix", ev),
         },
       );
       result = await runAcceptance(opts.cwd, t.id);
     }
 
-    outcomes.push({
-      task: t,
-      passed: result.pass,
-      attempts: attempt,
-      detail: result.pass ? "acceptance passed" : lastLines(result.output, 8),
-    });
-    log(result.pass ? `  ✓ ${t.id}` : `  ✗ ${t.id} still failing after ${attempt} attempt(s)`);
+    outcomes.push({ task: t, passed: result.pass, attempts: attempt, detail: result.pass ? "acceptance passed" : lastLines(result.output, 8) });
+    opts.emit({ type: "task-status", taskId: t.id, status: result.pass ? "passing" : "failing", detail: result.pass ? undefined : lastLines(result.output, 4) });
   }
   return outcomes;
 }
@@ -213,10 +225,9 @@ async function runAcceptance(cwd: string, id: string): Promise<{ pass: boolean; 
   return { pass: res.exitCode === 0, output };
 }
 
-// ── console helpers ──────────────────────────────────────────────────
-function printSub(id: string, kind: string, ev: AgentEvent): void {
-  if (ev.type === "tool-call") sub(`${id}/${kind}`, `▸ ${ev.name}`);
-  else if (ev.type === "error") sub(`${id}/${kind}`, `✗ ${ev.message}`);
+function emitActivity(opts: BuildOptions, taskId: string, kind: string, ev: AgentEvent): void {
+  if (ev.type === "tool-call") opts.emit({ type: "activity", taskId, kind, action: ev.name });
+  else if (ev.type === "error") opts.emit({ type: "activity", taskId, kind, action: `error: ${ev.message}` });
 }
 
 function lastLines(text: string, n: number): string {

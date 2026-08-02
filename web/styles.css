@@ -126,3 +126,41 @@ body {
 .tl-compaction { color: var(--yellow); font-family: var(--mono); font-size: 12px; }
 .tl-done { color: var(--green); white-space: pre-wrap; border-top: 1px solid var(--border); padding-top: 8px; margin-top: 4px; }
 .tl-error { color: var(--red); font-family: var(--mono); }
+
+/* ── build pipeline ──────────────────────────── */
+.newbuild textarea { border-color: #2d2440; }
+.build-hint { flex: 1; color: var(--muted); font-size: 12px; }
+.newbuild button { background: var(--mag, #a371f7); color: #0d0518; }
+
+.phase-pill {
+  display: inline-block; font-size: 11px; padding: 3px 9px; margin: 0 6px 6px 0;
+  border-radius: 999px; border: 1px solid var(--border); color: var(--muted);
+}
+.phase-pill.past { color: var(--green); border-color: rgba(63,185,80,0.4); }
+.phase-pill.current { color: var(--text); border-color: var(--accent); background: rgba(88,166,255,0.12); }
+
+.intent { line-height: 1.6; }
+.assumptions { margin: 10px 0 0; padding-left: 18px; color: var(--muted); font-size: 13px; }
+.assumptions li { margin: 3px 0; }
+
+.dag { width: 100%; height: auto; }
+.dag-edge { stroke: var(--border); stroke-width: 1.5; }
+.dag-node rect { fill: var(--panel-2); stroke: var(--border); stroke-width: 1.5; transition: all 0.3s; }
+.dag-id { fill: var(--text); font: 600 12px var(--mono); }
+.dag-status { fill: var(--muted); font: 10px var(--mono); text-transform: uppercase; letter-spacing: 0.5px; }
+.dag-act { fill: var(--accent); font: 10px var(--mono); }
+.status-developing rect { stroke: var(--yellow); fill: rgba(210,153,34,0.12); }
+.status-testing rect, .status-audited rect { stroke: var(--accent); }
+.status-fixing rect { stroke: #db6d28; fill: rgba(219,109,40,0.12); }
+.status-merged rect { stroke: #39c5cf; }
+.status-passing rect { stroke: var(--green); fill: rgba(63,185,80,0.14); }
+.status-failing rect, .status-merge-conflict rect { stroke: var(--red); fill: rgba(248,81,73,0.12); }
+
+.audits, .report { display: flex; flex-direction: column; gap: 6px; font-size: 13px; }
+.audit-row, .report-row { display: flex; gap: 10px; align-items: baseline; }
+.audit-mark { font-family: var(--mono); font-size: 12px; min-width: 64px; }
+.audit-row.ok .audit-mark, .report-row.ok { color: var(--green); }
+.audit-row.weak .audit-mark { color: var(--yellow); }
+.report-row.fail { color: var(--red); }
+.audit-task, .report-id { font-family: var(--mono); }
+.audit-issues, .report-detail { color: var(--muted); font-size: 12px; }
