@@ -5,7 +5,7 @@ import { build } from "../build/orchestrator";
 import { Tracer } from "../core/trace";
 import { listRuns, getRun } from "./runs";
 
-type WsData = { running: boolean };
+type WsData = { running: boolean; cwd: string };
 
 /**
  * The dashboard server. Two jobs:
@@ -15,7 +15,7 @@ type WsData = { running: boolean };
  * The second job is the point: the browser consumes the *same* event stream the
  * terminal renderer does. One event contract, many frontends.
  */
-export function startServer(port: number): Server<WsData> {
+export function startServer(port: number, cwd: string = process.cwd()): Server<WsData> {
   return Bun.serve<WsData>({
     port,
     hostname: "127.0.0.1", // local dev only — the agent can run shell commands
@@ -33,7 +33,7 @@ export function startServer(port: number): Server<WsData> {
     fetch(req, server) {
       const url = new URL(req.url);
       if (url.pathname === "/ws/run" || url.pathname === "/ws/build") {
-        return server.upgrade(req, { data: { running: false } })
+        return server.upgrade(req, { data: { running: false, cwd } })
           ? undefined
           : new Response("expected websocket", { status: 426 });
       }
@@ -68,7 +68,7 @@ async function streamBuild(ws: ServerWebSocket<WsData>, msg: BuildMsg): Promise<
   ws.send(JSON.stringify({ type: "build-started" }));
   try {
     await build(msg.goal!, {
-      cwd: process.cwd(),
+      cwd: ws.data.cwd,
       model: msg.model,
       autonomous: true, // the browser can't answer clarification prompts
       maxFixAttempts: msg.fixAttempts ?? 2,
@@ -91,7 +91,7 @@ async function streamRun(
   ws.send(JSON.stringify({ type: "run-started", runId: tracer.runId }));
   try {
     for await (const ev of runAgent(msg.task!, {
-      cwd: process.cwd(),
+      cwd: ws.data.cwd,
       maxSteps: msg.maxSteps ?? 20,
       tracer,
       compact: msg.compact !== false,

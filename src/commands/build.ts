@@ -1,4 +1,5 @@
 import { Option, Command, type Usage } from "clipanion";
+import { resolve } from "node:path";
 import { build } from "../build/orchestrator";
 import { renderBuildEvent } from "../build/render";
 
@@ -11,6 +12,7 @@ export class BuildCommand extends Command {
   });
 
   goal = Option.String({ required: true });
+  cwd = Option.String("--cwd", { description: "Target git repository (default: current dir)" });
   model = Option.String("--model", { description: "Model id (default: deepseek-chat)" });
   yes = Option.Boolean("--yes", false, { description: "Autonomous: skip clarification, proceed on assumptions" });
   fixAttempts = Option.String("--fix-attempts", "2", { description: "Max fix attempts per failing task" });
@@ -18,7 +20,7 @@ export class BuildCommand extends Command {
 
   override async execute(): Promise<number | void> {
     const outcomes = await build(this.goal, {
-      cwd: process.cwd(),
+      cwd: this.cwd ? resolve(this.cwd) : process.cwd(),
       model: this.model,
       autonomous: this.yes,
       maxFixAttempts: Number.parseInt(this.fixAttempts, 10) || 2,

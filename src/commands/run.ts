@@ -1,4 +1,5 @@
 import { Option, Command, type Usage } from "clipanion";
+import { resolve } from "node:path";
 import { runAgent } from "../core/agent";
 import { Tracer } from "../core/trace";
 import { TerminalRenderer } from "../render";
@@ -12,6 +13,7 @@ export class RunCommand extends Command {
   });
 
   task = Option.String({ required: true });
+  cwd = Option.String("--cwd", { description: "Working directory the agent operates in (default: current dir)" });
   model = Option.String("--model", { description: "Model id (default: deepseek-chat)" });
   maxSteps = Option.String("--max-steps", "20", { description: "Max agent steps" });
   noCompact = Option.Boolean("--no-compact", false, { description: "Disable context compaction" });
@@ -19,7 +21,7 @@ export class RunCommand extends Command {
   dryRun = Option.Boolean("--dry-run", false, { description: "Print config and exit" });
 
   override async execute(): Promise<number | void> {
-    const cwd = process.cwd();
+    const cwd = this.cwd ? resolve(this.cwd) : process.cwd();
     const maxSteps = Number.parseInt(this.maxSteps, 10) || 20;
 
     if (this.dryRun) {
