@@ -198,10 +198,12 @@ and the orchestrator pauses at two checkpoints, awaiting you:
 2. **Approve the plan.** After decomposition, the DAG renders and **no code is
    written until you approve it.**
 
-Development, tests, and acceptance then run with no further interruption. Each
-build is persisted to `.castle/builds/<id>.json` as it progresses. (Full
-structural DAG editing and click-a-node status are the next steps; today the
-checkpoint is answer-and-approve.)
+At the approve step the plan is **fully editable**: retitle tasks, rewrite
+descriptions and acceptance criteria, add or delete tasks, and rewire
+dependencies — the DAG re-lays-out live and validates for cycles/dangling deps.
+The edited task set is what actually gets built. Development, tests, and acceptance
+then run with no further interruption. Each build is persisted to
+`.castle/builds/<id>.json` as it progresses.
 
 ![clarify checkpoint](docs/build-clarify-checkpoint.png)
 
@@ -256,7 +258,8 @@ with `--continue` and turn 3 still recalled the fact — cache-hit climbing 78% 
 | **P5+** ✅ | Persistent memory, progressive-disclosure skills, hand-rolled MCP stdio client |
 | **P7** ✅ | Interactive multi-turn `castle chat`: disk-persisted, resumable sessions |
 | **P8** ✅ | Recursive decomposition (task tree → leaf DAG) + HIL checkpoints (clarify + approve-plan) over a bidirectional WS; builds persisted to disk |
-| P8+ | Full structural DAG editing + click-a-node agent status (view) |
+| **P8.1** ✅ | Full structural plan editing at the checkpoint (retitle / add / delete / rewire deps, live-validated DAG) |
+| P8+ | Contract-first decomposition, shared-edit protocol, click-a-node agent status ([design](docs/architecture-full-stack.md)) |
 | P1 | Tool permissions & risk model, richer file tools |
 | P3 | Textual-style TUI, steering & interruption |
 | P6 | Eval harness on real tasks (success rate / tokens / cost / cache hit) |

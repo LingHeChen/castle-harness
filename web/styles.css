@@ -149,6 +149,27 @@ body {
 .clarify-q input { width: 100%; background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px; color: var(--text); padding: 8px; font: inherit; }
 .clarify-q input:focus { outline: none; border-color: var(--accent); }
 .checkpoint-go { margin-top: 12px; background: var(--yellow); color: #1a1204; border: 0; border-radius: 6px; padding: 9px 18px; font-weight: 700; cursor: pointer; }
+.checkpoint-go:disabled { opacity: 0.4; cursor: default; }
+
+/* plan editor (Phase C) */
+.editor-dag { margin: 10px 0 16px; }
+.editor-error { color: var(--red); font-family: var(--mono); font-size: 13px; padding: 16px; border: 1px dashed var(--red); border-radius: 8px; }
+.task-editor { display: flex; flex-direction: column; gap: 10px; }
+.task-card { background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px; padding: 12px; }
+.task-card-head { display: flex; align-items: center; gap: 8px; }
+.task-card-head .task-id { font-family: var(--mono); font-size: 11px; color: var(--muted); white-space: nowrap; }
+.task-title { flex: 1; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; color: var(--text); padding: 6px 8px; font: 600 13px inherit; }
+.task-del { background: transparent; border: 0; color: var(--muted); cursor: pointer; font-size: 14px; }
+.task-del:hover { color: var(--red); }
+.task-field { display: flex; flex-direction: column; gap: 3px; font-size: 11px; color: var(--muted); margin-top: 8px; }
+.task-field textarea { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; color: var(--text); padding: 6px 8px; font: 12px var(--mono); resize: vertical; }
+.task-field textarea:focus, .task-title:focus { outline: none; border-color: var(--accent); }
+.task-deps { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.task-deps-label { font-size: 11px; color: var(--muted); }
+.dep-chip { font-size: 11px; font-family: var(--mono); color: var(--text); display: inline-flex; align-items: center; gap: 3px; }
+.editor-actions { display: flex; justify-content: space-between; align-items: center; margin-top: 14px; }
+.task-add { background: var(--panel-2); border: 1px solid var(--border); color: var(--text); border-radius: 6px; padding: 8px 14px; cursor: pointer; font: inherit; }
+.task-add:hover { border-color: var(--accent); }
 
 .intent { line-height: 1.6; }
 .assumptions { margin: 10px 0 0; padding-left: 18px; color: var(--muted); font-size: 13px; }

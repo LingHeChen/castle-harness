@@ -2,6 +2,7 @@ import React, { useState } from "react";
 import type { BuildEvent, BuildTask, TaskStatus } from "../src/build/events";
 import type { Task } from "../src/build/schemas";
 import { DagChart } from "./DagChart";
+import { PlanEditor } from "./PlanEditor";
 
 const PHASES = ["understand", "decompose", "tests + audit", "develop", "acceptance"];
 
@@ -86,7 +87,7 @@ export function BuildView({
       </div>
 
       {pending?.kind === "clarify" && <ClarifyPanel questions={pending.questions} respond={respond} />}
-      {pending?.kind === "approval" && <ApprovalPanel tasks={pending.tasks} respond={respond} />}
+      {pending?.kind === "approval" && <PlanEditor initial={pending.tasks} respond={respond} />}
 
       {s.intent && (
         <section className="panel">
@@ -167,14 +168,3 @@ function ClarifyPanel({ questions, respond }: { questions: Array<{ question: str
   );
 }
 
-function ApprovalPanel({ tasks, respond }: { tasks: Task[]; respond: (msg: object) => void }) {
-  return (
-    <section className="panel checkpoint">
-      <h2>⏸ review the plan — {tasks.length} tasks — approve to start building</h2>
-      <p className="hint">The DAG below is the proposed plan. Development doesn't start until you approve. (Structural editing lands next.)</p>
-      <button className="checkpoint-go" onClick={() => respond({ type: "approval-response", tasks })}>
-        approve &amp; build →
-      </button>
-    </section>
-  );
-}
