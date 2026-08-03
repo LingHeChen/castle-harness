@@ -10,8 +10,10 @@ DeepSeek's API.
 > the context window, the tool protocol, and KV-cache economics — not another
 > wrapper over a chat endpoint.
 
-**Writeup:** [Notes on building a coding-agent harness](docs/harness-notes.md) —
-the design decisions and the honest limitations.
+**Writeups:** [Notes on building a coding-agent harness](docs/harness-notes.md)
+(design decisions + honest limitations) · [Architecture: from one sentence to a
+small full-stack app](docs/architecture-full-stack.md) (where this is headed —
+contract-first decomposition, the shared-edit protocol, mid-build replanning).
 
 ## Status
 
