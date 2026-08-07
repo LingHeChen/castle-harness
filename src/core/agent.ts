@@ -1,6 +1,6 @@
 import { streamText, stepCountIs, type ModelMessage, type LanguageModel, type ToolSet } from "ai";
 import { createModel, resolveModelConfig } from "./model";
-import { buildTools } from "../tools";
+import { buildTools, type WriteGuard } from "../tools";
 import { SYSTEM_PROMPT } from "./prompt";
 import { toUsage, type AgentEvent } from "./events";
 import { ContextManager } from "./context";
@@ -21,6 +21,8 @@ export type AgentOptions = {
   compact?: boolean;
   /** Token budget that triggers compaction (default 20_000). */
   contextBudget?: number;
+  /** Intercept mutating file ops (permissions / the shared-edit protocol). */
+  guard?: WriteGuard;
 };
 
 /**
@@ -31,14 +33,14 @@ export type AgentOptions = {
  */
 export type AgentDeps = { model: LanguageModel; system: string; tools: ToolSet; closeMcp: () => void };
 
-export async function prepareAgent(opts: { cwd: string; model?: string; system?: string }): Promise<AgentDeps> {
+export async function prepareAgent(opts: { cwd: string; model?: string; system?: string; guard?: WriteGuard }): Promise<AgentDeps> {
   const model = createModel(resolveModelConfig(opts.model));
   // Loaded once: memory + skills become a stable part of the prompt prefix.
   const [memory, skills] = await Promise.all([loadMemory(opts.cwd), listSkills(opts.cwd)]);
   const system = augmentSystem(opts.system ?? SYSTEM_PROMPT, memory, skills);
   // MCP tools join the registry namespaced mcp__<server>__<tool>.
   const mcp = await connectConfiguredMcp(opts.cwd);
-  const tools = { ...buildTools({ cwd: opts.cwd, skills }), ...mcp.tools };
+  const tools = { ...buildTools({ cwd: opts.cwd, skills, guard: opts.guard }), ...mcp.tools };
   return { model, system, tools, closeMcp: mcp.close };
 }
 
@@ -132,7 +134,7 @@ export async function* streamMessages(
 
 /** One-shot: run a single task to completion and stream its events. */
 export async function* runAgent(task: string, opts: AgentOptions): AsyncGenerator<AgentEvent> {
-  const deps = await prepareAgent({ cwd: opts.cwd, model: opts.model, system: opts.system });
+  const deps = await prepareAgent({ cwd: opts.cwd, model: opts.model, system: opts.system, guard: opts.guard });
   try {
     const messages: ModelMessage[] = [{ role: "user", content: task }];
     yield* streamMessages(messages, deps, { tracer: opts.tracer, maxSteps: opts.maxSteps, compact: opts.compact, contextBudget: opts.contextBudget });

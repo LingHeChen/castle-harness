@@ -29,6 +29,10 @@ export function fsTools(ctx: ToolContext): ToolSet {
       content: z.string().describe("The full contents to write."),
     }),
     execute: async ({ path, content }) => {
+      if (ctx.guard) {
+        const d = await ctx.guard({ op: "write", path, content });
+        if (d.type !== "allow") return d.message;
+      }
       await Bun.write(abs(path), content);
       return `Wrote ${content.length} chars to ${path}`;
     },
@@ -50,6 +54,10 @@ export function fsTools(ctx: ToolContext): ToolSet {
       const count = original.split(old_string).length - 1;
       if (count === 0) return `Error: old_string not found in ${path}`;
       if (count > 1) return `Error: old_string matches ${count} times in ${path}; add more context to make it unique`;
+      if (ctx.guard) {
+        const d = await ctx.guard({ op: "edit", path, old_string, new_string });
+        if (d.type !== "allow") return d.message;
+      }
       await Bun.write(abs(path), original.replace(old_string, new_string));
       return `Edited ${path}`;
     },
