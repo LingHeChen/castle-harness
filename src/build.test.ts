@@ -3,7 +3,7 @@ import { toWaves } from "./build/graph";
 import type { Task } from "./build/schemas";
 
 function task(id: string, dependsOn: string[] = []): Task {
-  return { id, title: id, description: "", acceptanceCriteria: ["c"], dependsOn, files: [`${id}.ts`] };
+  return { id, title: id, description: "", acceptanceCriteria: ["c"], dependsOn, files: [`${id}.ts`], kind: "feature" };
 }
 
 test("independent tasks land in one parallel wave", () => {

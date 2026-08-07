@@ -1,4 +1,5 @@
 import { $ } from "bun";
+import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 
 /**
@@ -22,6 +23,49 @@ export async function ensureCommitted(cwd: string, message: string): Promise<voi
   if (status.stdout.toString().trim()) {
     await $`git commit -m ${message}`.cwd(cwd).quiet();
   }
+}
+
+/**
+ * "From nothing" bootstrap. A build develops each task in a git worktree, and
+ * `git worktree add … HEAD` needs a repo that already has a HEAD commit. So for an
+ * empty or non-git target directory we: create it, `git init`, scaffold the minimal
+ * Bun/TS project files that are missing (never clobbering existing ones), and make
+ * an initial commit — so the from-scratch case just works instead of erroring out.
+ * Existing repos with a commit are left untouched.
+ */
+export async function ensureRepo(cwd: string): Promise<{ bootstrapped: boolean }> {
+  mkdirSync(cwd, { recursive: true });
+
+  const wasRepo = await isGitRepo(cwd);
+  if (!wasRepo) await $`git init -q`.cwd(cwd).quiet();
+
+  const hasCommit = (await $`git rev-parse --verify -q HEAD`.cwd(cwd).nothrow().quiet()).exitCode === 0;
+  if (wasRepo && hasCommit) return { bootstrapped: false };
+
+  await scaffoldIfMissing(cwd);
+  await ensureCommitted(cwd, "castle: bootstrap project");
+  return { bootstrapped: true };
+}
+
+/** Create the minimal Bun + TypeScript project files, but only those that don't exist yet. */
+async function scaffoldIfMissing(cwd: string): Promise<void> {
+  const write = async (rel: string, content: string) => {
+    const f = Bun.file(join(cwd, rel));
+    if (!(await f.exists())) await Bun.write(f, content);
+  };
+  await write(
+    "package.json",
+    JSON.stringify({ name: "castle-app", module: "index.ts", type: "module", private: true }, null, 2) + "\n",
+  );
+  await write(
+    "tsconfig.json",
+    JSON.stringify(
+      { compilerOptions: { target: "ESNext", module: "ESNext", moduleResolution: "bundler", strict: true, types: ["bun-types"], skipLibCheck: true } },
+      null,
+      2,
+    ) + "\n",
+  );
+  await write(".gitignore", ["node_modules", ".castle", "dist", "*.log"].join("\n") + "\n");
 }
 
 export async function addWorktree(cwd: string, id: string): Promise<Worktree> {

@@ -22,4 +22,17 @@ Guidelines:
 - Be concise in your prose. The user sees your text between tool calls; explain
   what you are doing and why, not every mechanical detail.
 - When the task is complete, stop calling tools and give a short summary of what
-  you did and how you verified it.`;
+  you did and how you verified it.
+
+语言：除非任务另有要求，一律用简体中文输出所有自然语言内容（说明、总结、意图、
+任务标题/描述、验收标准、审计意见、日志、场景描述）。代码、标识符、文件名、命令、
+API 字段名保持英文。`;
+
+/**
+ * A reusable directive appended to role-specific subagent/`think` system prompts so
+ * the build pipeline's artifacts (intent, task titles, criteria, audit notes,
+ * integration scenarios) come out in Chinese while code stays English.
+ */
+export const OUTPUT_ZH =
+  "\n\n语言：除非另有要求，所有自然语言内容一律用简体中文——包括说明、总结、意图、" +
+  "任务标题/描述、验收标准、审计意见、日志与场景描述。代码、标识符、文件名、命令、API 字段名保持英文。";

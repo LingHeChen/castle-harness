@@ -15,8 +15,23 @@ export type TaskNode = {
   children: TaskNode[];
 };
 
+/** What a branch expansion knows about the rest of the build — the "信息互通" seam. */
+export type LeafInfo = { id: string; title: string; files: string[] };
+export type ExpandContext = {
+  /** The one fixed stack + path conventions every task must obey. */
+  stack: string;
+  /** Leaves already planned (depth-first, left-to-right) so a branch can reuse,
+   *  not re-invent, components/files a sibling already owns. */
+  existing: LeafInfo[];
+  /** Set when the node must be split (e.g. the whole goal) — never returned atomic. */
+  mustSplit?: boolean;
+};
+
 /** Expand one node: decide atomic-vs-split. Injectable so recursion is testable. */
-export type ExpandFn = (node: { id: string; title: string; description: string; depth: number }) => Promise<DecomposeStep>;
+export type ExpandFn = (
+  node: { id: string; title: string; description: string; depth: number },
+  ctx: ExpandContext,
+) => Promise<DecomposeStep>;
 
 /** Called as each node is resolved, so callers can stream recursion progress. */
 export type OnNode = (node: { id: string; title: string; depth: number; leaf: boolean }) => void;
@@ -25,21 +40,34 @@ export type OnNode = (node: { id: string; title: string; depth: number; leaf: bo
  * Recursively decompose `root` into a task tree, stopping a branch when the model
  * says it's atomic, when it proposes no subtasks, or at `maxDepth`. Ids are made
  * globally unique (and file-safe) as the tree is built.
+ *
+ * Branches don't expand blind: each call sees the fixed `stack` and the leaves
+ * already planned, so later branches reuse (and depend on) what earlier ones built
+ * instead of re-deriving storage/routes/server in divergent files or languages.
  */
 export async function buildTaskTree(
   root: { id: string; title: string; description: string },
   expand: ExpandFn,
   maxDepth: number,
   onNode?: OnNode,
+  stack = "",
 ): Promise<TaskNode> {
   const used = new Set<string>();
+  const existing: LeafInfo[] = []; // accumulates as the tree is built (depth-first)
 
   async function go(node: { id: string; title: string; description: string }, depth: number): Promise<TaskNode> {
     const id = uniquify(node.id, used);
-    const step = await expand({ id, title: node.title, description: node.description, depth });
+    let step = await expand({ id, title: node.title, description: node.description, depth }, { stack, existing });
+
+    // The whole goal (root) must never collapse to a single atomic task — force a
+    // split so a multi-component service doesn't come back as one node.
+    if (depth === 0 && maxDepth > 0 && (step.atomic || step.subtasks.length === 0)) {
+      step = await expand({ id, title: node.title, description: node.description, depth }, { stack, existing, mustSplit: true });
+    }
 
     if (step.atomic || depth >= maxDepth || step.subtasks.length === 0) {
       onNode?.({ id, title: node.title, depth, leaf: true });
+      existing.push({ id, title: node.title, files: step.files }); // now visible to later branches
       return { id, title: node.title, description: node.description, acceptanceCriteria: step.acceptanceCriteria, files: step.files, children: [] };
     }
 

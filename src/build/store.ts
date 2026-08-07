@@ -1,7 +1,8 @@
-import { mkdirSync, readdirSync } from "node:fs";
+import { appendFileSync, mkdirSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import type { Task } from "./schemas";
-import type { BuildTreeNode } from "./events";
+import type { BuildEmit, BuildEvent, BuildTreeNode } from "./events";
+import type { IntegrationReport } from "./integration";
 
 /**
  * A build persisted to disk. Like a chat session, a build is a durable record:
@@ -17,12 +18,51 @@ export type BuildRecord = {
   tree?: BuildTreeNode;
   tasks?: Task[];
   outcomes?: Array<{ id: string; passed: boolean; attempts: number; detail: string }>;
+  integration?: IntegrationReport;
 };
 
 const BUILDS_DIR = ".castle/builds";
 
 export function newBuildId(now: number): string {
   return `bld-${now}`;
+}
+
+/**
+ * Append-only run log for a build. Every {@link BuildEvent} is written as one
+ * timestamped JSON line to `.castle/builds/<id>.events.jsonl`, so a whole build —
+ * phases, activity, shared edits, ripple, integration — is inspectable on disk
+ * after the fact (by a human, or by an agent debugging a run) without a live WS.
+ */
+export class BuildLog {
+  readonly path: string;
+
+  constructor(cwd: string, buildId: string) {
+    const dir = join(cwd, BUILDS_DIR);
+    mkdirSync(dir, { recursive: true });
+    this.path = join(dir, `${buildId}.events.jsonl`);
+  }
+
+  // Append (not truncate) + fsync per line: a resume continues the same build's
+  // log instead of wiping it, and the file is durable/tailable at any moment.
+  write(ev: BuildEvent): void {
+    appendFileSync(this.path, JSON.stringify({ ts: Date.now(), ...ev }) + "\n");
+  }
+
+  /**
+   * Wrap a downstream emit so every event is logged to disk AND forwarded once.
+   * Takes `downstream` explicitly (not via a mutable binding) so the wrapper can
+   * never accidentally call itself — the tee is a pure fan-out, not a loop.
+   */
+  tee(downstream: BuildEmit): BuildEmit {
+    return (ev) => {
+      this.write(ev);
+      downstream(ev);
+    };
+  }
+
+  close(): void {
+    /* append mode opens per write — nothing to close */
+  }
 }
 
 export async function saveBuild(cwd: string, record: BuildRecord): Promise<void> {

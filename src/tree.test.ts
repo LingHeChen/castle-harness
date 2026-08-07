@@ -25,6 +25,38 @@ function buildFixture(maxDepth = 5): Promise<TaskNode> {
   return buildTaskTree({ id: "root", title: "root", description: "g" }, fakeExpand, maxDepth);
 }
 
+test("branches share the fixed stack and see already-planned leaves (信息互通)", async () => {
+  const seen: Array<{ title: string; stack: string; existing: string[] }> = [];
+  const expand: ExpandFn = async (n, ctx) => {
+    seen.push({ title: n.title, stack: ctx.stack, existing: ctx.existing.map((e) => e.id) });
+    if (n.title === "root")
+      return { atomic: false, acceptanceCriteria: [], files: [], subtasks: [
+        { id: "a", title: "A", description: "" },
+        { id: "b", title: "B", description: "" },
+      ] };
+    return { atomic: true, acceptanceCriteria: ["ok"], files: [`${n.id}.ts`], subtasks: [] };
+  };
+  await buildTaskTree({ id: "root", title: "root", description: "" }, expand, 3, undefined, "TS on Bun");
+
+  expect(seen.every((s) => s.stack === "TS on Bun")).toBe(true); // stack threaded everywhere
+  expect(seen.find((s) => s.title === "A")!.existing).toEqual([]); // A expanded first, sees nothing yet
+  expect(seen.find((s) => s.title === "B")!.existing).toContain("root-a"); // B sees A's leaf
+});
+
+test("the root is never a single atomic leaf — a mustSplit retry forces a split", async () => {
+  const expand: ExpandFn = async (n, ctx) => {
+    // The model wants to call the whole goal atomic; only splits when forced.
+    if (n.title === "root" && !ctx.mustSplit) return { atomic: true, acceptanceCriteria: ["done"], files: ["all.ts"], subtasks: [] };
+    if (n.title === "root") return { atomic: false, acceptanceCriteria: [], files: [], subtasks: [
+      { id: "types", title: "types", description: "" },
+      { id: "api", title: "api", description: "" },
+    ] };
+    return { atomic: true, acceptanceCriteria: ["ok"], files: [`${n.id}.ts`], subtasks: [] };
+  };
+  const tree = await buildTaskTree({ id: "root", title: "root", description: "" }, expand, 3);
+  expect(leavesOf(tree).map((l) => l.id).sort()).toEqual(["root-api", "root-types"]); // split, not 1 leaf
+});
+
 test("recursion expands to leaves and prefixes ids by parent", async () => {
   const tree = await buildFixture();
   expect(leavesOf(tree).map((l) => l.id).sort()).toEqual(["root-api-db", "root-api-routes", "root-ui"]);
