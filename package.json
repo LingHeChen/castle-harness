@@ -23,6 +23,7 @@
   },
   "dependencies": {
     "@ai-sdk/openai": "^4.0.20",
+    "@xyflow/react": "^12.11.2",
     "ai": "^7.0.37",
     "clipanion": "^4.0.0-rc.4",
     "react": "^19.2.8",
