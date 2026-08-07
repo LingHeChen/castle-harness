@@ -4,16 +4,17 @@ import { toWaves } from "../src/build/graph";
 import { DagChart } from "./DagChart";
 
 /**
- * The DAG-approval checkpoint, made editable. The user can retitle tasks, rewrite
- * descriptions and acceptance criteria, add or delete tasks, and rewire
- * dependencies — the live DAG re-lays-out on every change and validates for
- * cycles/dangling deps. Nothing is built until "approve & build". The edited
- * Task[] is what the orchestrator then executes (via reviewPlan).
+ * The DAG-approval checkpoint, edited ON the graph. Dependencies and structure are
+ * manipulated directly on the canvas — drag a node onto another to add a dependency,
+ * click an edge to remove it, click a node to select it — and the selected task's
+ * details (title, description, criteria, files, contract flag) are edited in a
+ * compact side panel instead of one long form. The DAG re-lays-out by wave on every
+ * change and validates for cycles/dangling deps. Nothing is built until approval.
  */
 export function PlanEditor({ initial, respond }: { initial: Task[]; respond: (msg: object) => void }) {
   const [tasks, setTasks] = useState<Task[]>(initial);
+  const [selected, setSelected] = useState<string | null>(initial[0]?.id ?? null);
 
-  // Recompute waves for the preview; a cycle/dangling dep surfaces as an error.
   const { waves, error } = useMemo(() => {
     try {
       return { waves: toWaves(tasks).map((w) => w.map((t) => t.id)), error: null as string | null };
@@ -22,61 +23,87 @@ export function PlanEditor({ initial, respond }: { initial: Task[]; respond: (ms
     }
   }, [tasks]);
 
-  const patch = (id: string, p: Partial<Task>) => setTasks(tasks.map((t) => (t.id === id ? { ...t, ...p } : t)));
-  const remove = (id: string) => setTasks(tasks.filter((t) => t.id !== id).map((t) => ({ ...t, dependsOn: t.dependsOn.filter((d) => d !== id) })));
+  const patch = (id: string, p: Partial<Task>) => setTasks((ts) => ts.map((t) => (t.id === id ? { ...t, ...p } : t)));
+  const remove = (id: string) => {
+    setTasks((ts) => ts.filter((t) => t.id !== id).map((t) => ({ ...t, dependsOn: t.dependsOn.filter((d) => d !== id) })));
+    setSelected((s) => (s === id ? null : s));
+  };
   const add = () => {
     const id = uniqueId(tasks);
-    setTasks([...tasks, { id, title: "new task", description: "", acceptanceCriteria: ["does what it should"], dependsOn: [], files: [] }]);
+    setTasks((ts) => [...ts, { id, title: "新任务", description: "", acceptanceCriteria: ["按预期工作"], dependsOn: [], files: [], kind: "feature" }]);
+    setSelected(id);
   };
-  const toggleDep = (id: string, dep: string) =>
-    patch(id, { dependsOn: tasks.find((t) => t.id === id)!.dependsOn.includes(dep) ? tasks.find((t) => t.id === id)!.dependsOn.filter((d) => d !== dep) : [...tasks.find((t) => t.id === id)!.dependsOn, dep] });
+  // Drag source→target on the DAG: target depends on source (guard against self + dup).
+  const connect = (from: string, to: string) =>
+    setTasks((ts) => ts.map((t) => (t.id === to && from !== to && !t.dependsOn.includes(from) ? { ...t, dependsOn: [...t.dependsOn, from] } : t)));
+  const disconnect = (dep: string, task: string) =>
+    setTasks((ts) => ts.map((t) => (t.id === task ? { ...t, dependsOn: t.dependsOn.filter((d) => d !== dep) } : t)));
+
+  const sel = tasks.find((t) => t.id === selected) ?? null;
 
   return (
     <section className="panel checkpoint">
-      <h2>⏸ review &amp; edit the plan — {tasks.length} tasks — approve to start building</h2>
-      <p className="hint">Edit tasks, rewire dependencies, add/remove. Nothing is built until you approve.</p>
+      <h2>⏸ 在 DAG 上审阅并编辑计划 — {tasks.length} 个任务</h2>
 
-      <div className="editor-dag">
-        {error ? <div className="editor-error">⚠ {error}</div> : <DagChart tasks={tasks} waves={waves} status={{}} activity={{}} />}
-      </div>
+      <div className="plan-editor">
+        <div className="plan-dag">
+          <DagChart
+            tasks={tasks}
+            waves={waves}
+            status={{}}
+            activity={{}}
+            editable
+            selectedId={selected}
+            onSelect={setSelected}
+            onConnect={connect}
+            onDeleteEdge={disconnect}
+          />
+          {error && <div className="editor-error">⚠ {error}</div>}
+        </div>
 
-      <div className="task-editor">
-        {tasks.map((t) => (
-          <div key={t.id} className="task-card">
-            <div className="task-card-head">
-              <span className="task-id">{t.id}</span>
-              <input className="task-title" value={t.title} onChange={(e) => patch(t.id, { title: e.target.value })} />
-              <button className="task-del" title="delete task" onClick={() => remove(t.id)}>✕</button>
-            </div>
-            <label className="task-field">description
-              <textarea value={t.description} rows={2} onChange={(e) => patch(t.id, { description: e.target.value })} />
-            </label>
-            <label className="task-field">acceptance criteria (one per line)
-              <textarea value={t.acceptanceCriteria.join("\n")} rows={2} onChange={(e) => patch(t.id, { acceptanceCriteria: splitLines(e.target.value) })} />
-            </label>
-            <label className="task-field">files (one per line)
-              <textarea value={t.files.join("\n")} rows={1} onChange={(e) => patch(t.id, { files: splitLines(e.target.value) })} />
-            </label>
-            <div className="task-deps">
-              <span className="task-deps-label">depends on:</span>
-              {tasks.filter((o) => o.id !== t.id).map((o) => (
-                <label key={o.id} className="dep-chip">
-                  <input type="checkbox" checked={t.dependsOn.includes(o.id)} onChange={() => toggleDep(t.id, o.id)} /> {o.id}
-                </label>
-              ))}
-              {tasks.length === 1 && <span className="task-deps-label">(no other tasks)</span>}
-            </div>
-          </div>
-        ))}
+        <aside className="plan-detail">
+          {sel ? (
+            <TaskDetail key={sel.id} task={sel} onPatch={(p) => patch(sel.id, p)} onDelete={() => remove(sel.id)} />
+          ) : (
+            <p className="hint">点击一个节点来编辑它的细节。拖一个节点到另一个节点＝加依赖，点击连线＝删依赖。</p>
+          )}
+        </aside>
       </div>
 
       <div className="editor-actions">
-        <button className="task-add" onClick={add}>+ add task</button>
+        <button className="task-add" onClick={add}>+ 新增任务</button>
         <button className="checkpoint-go" disabled={!!error || tasks.length === 0} onClick={() => respond({ type: "approval-response", tasks })}>
-          approve &amp; build →
+          批准并构建 →
         </button>
       </div>
     </section>
+  );
+}
+
+function TaskDetail({ task, onPatch, onDelete }: { task: Task; onPatch: (p: Partial<Task>) => void; onDelete: () => void }) {
+  return (
+    <div className={`task-card${task.kind === "contract" ? " task-card-contract" : ""}`}>
+      <div className="task-card-head">
+        <span className="task-id">{task.id}</span>
+        {task.kind === "contract" && <span className="contract-badge">契约</span>}
+        <button className="task-del" title="删除任务" onClick={onDelete}>✕</button>
+      </div>
+      <label className="task-field">标题
+        <input className="task-title" value={task.title} onChange={(e) => onPatch({ title: e.target.value })} />
+      </label>
+      <label className="task-field">描述
+        <textarea value={task.description} rows={3} onChange={(e) => onPatch({ description: e.target.value })} />
+      </label>
+      <label className="task-field">验收标准（每行一条）
+        <textarea value={task.acceptanceCriteria.join("\n")} rows={3} onChange={(e) => onPatch({ acceptanceCriteria: splitLines(e.target.value) })} />
+      </label>
+      <label className="task-field">文件（每行一个）
+        <textarea value={task.files.join("\n")} rows={2} onChange={(e) => onPatch({ files: splitLines(e.target.value) })} />
+      </label>
+      <label className="contract-toggle" title="把该任务标记为共享契约">
+        <input type="checkbox" checked={task.kind === "contract"} onChange={(e) => onPatch({ kind: e.target.checked ? "contract" : "feature" })} /> 标记为契约
+      </label>
+    </div>
   );
 }
 

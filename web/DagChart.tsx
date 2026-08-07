@@ -1,73 +1,105 @@
-import React from "react";
+import React, { useMemo } from "react";
+import { ReactFlow, Background, BackgroundVariant, Controls, Handle, Position, type Edge, type Node, type NodeProps } from "@xyflow/react";
+import "@xyflow/react/dist/style.css";
 import type { BuildTask, TaskStatus } from "../src/build/events";
 
 /**
- * Hand-drawn SVG of the task dependency graph, laid out by concurrency wave:
- * column = wave (things in the same column run in parallel), edges = deps. Nodes
- * light up live as the build moves each task through its states.
+ * The task dependency graph, on React Flow: column = concurrency wave (things in a
+ * column run in parallel), edges = deps. Read-only in the live build view (nodes
+ * light up by status); editable in the plan checkpoint (drag a node's right handle
+ * onto another to add a dependency, click an edge to remove it, click a node to
+ * edit it in the side panel). Pan/zoom is trackpad-native: two-finger scroll pans,
+ * pinch zooms.
  */
+
+type TaskNodeData = { task: BuildTask; status: TaskStatus; activity?: string; editable: boolean };
+
+function TaskNodeView({ data, selected }: NodeProps) {
+  const { task, status, activity, editable } = data as unknown as TaskNodeData;
+  const isContract = task.kind === "contract";
+  return (
+    <div className={`rf-node status-${status}${isContract ? " contract" : ""}${selected ? " selected" : ""}`}>
+      <Handle type="target" position={Position.Left} isConnectable={editable} />
+      <div className="rf-node-head">
+        <span className="rf-node-id">{task.id}</span>
+        {isContract && <span className="rf-node-badge">◆ 契约</span>}
+      </div>
+      <div className="rf-node-title">{task.title}</div>
+      {!editable && <div className="rf-node-status">{status}{activity ? ` · ▸ ${activity}` : ""}</div>}
+      <Handle type="source" position={Position.Right} isConnectable={editable} />
+    </div>
+  );
+}
+
+const nodeTypes = { task: TaskNodeView };
+const noop = () => {};
+
 export function DagChart({
   tasks,
   waves,
   status,
   activity,
+  editable = false,
+  selectedId = null,
+  onSelect,
+  onConnect,
+  onDeleteEdge,
 }: {
   tasks: BuildTask[];
   waves: string[][];
   status: Record<string, TaskStatus>;
   activity: Record<string, string>;
+  editable?: boolean;
+  selectedId?: string | null;
+  onSelect?: (id: string) => void;
+  onConnect?: (from: string, to: string) => void; // to depends on from
+  onDeleteEdge?: (dep: string, task: string) => void;
 }) {
-  if (tasks.length === 0) return <div className="chart-empty">no tasks yet</div>;
+  const nodes: Node[] = useMemo(() => {
+    const waveOf = new Map<string, number>();
+    const rowOf = new Map<string, number>();
+    waves.forEach((w, i) => w.forEach((id, r) => (waveOf.set(id, i), rowOf.set(id, r))));
+    return tasks.map((t) => ({
+      id: t.id,
+      type: "task",
+      position: { x: (waveOf.get(t.id) ?? 0) * 260, y: (rowOf.get(t.id) ?? 0) * 120 },
+      data: { task: t, status: status[t.id] ?? "pending", activity: activity[t.id], editable } satisfies TaskNodeData,
+      selected: t.id === selectedId,
+      draggable: false,
+    }));
+  }, [tasks, waves, status, activity, editable, selectedId]);
 
-  const waveOf = new Map<string, number>();
-  const rowOf = new Map<string, number>();
-  waves.forEach((w, i) => w.forEach((id, r) => (waveOf.set(id, i), rowOf.set(id, r))));
+  const edges: Edge[] = useMemo(
+    () => tasks.flatMap((t) => t.dependsOn.map((dep) => ({ id: `${dep}->${t.id}`, source: dep, target: t.id }))),
+    [tasks],
+  );
 
-  const colW = 210;
-  const rowH = 92;
-  const padX = 16;
-  const padY = 16;
-  const nodeW = 168;
-  const nodeH = 66;
-  const maxRows = Math.max(...waves.map((w) => w.length), 1);
-  const W = padX * 2 + Math.max(waves.length, 1) * colW;
-  const H = padY * 2 + maxRows * rowH;
-
-  const pos = (id: string) => ({
-    x: padX + (waveOf.get(id) ?? 0) * colW,
-    y: padY + (rowOf.get(id) ?? 0) * rowH,
-  });
+  if (tasks.length === 0) return <div className="chart-empty">暂无任务</div>;
 
   return (
-    <svg className="dag" viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="xMidYMid meet">
-      {/* dependency edges */}
-      {tasks.flatMap((t) =>
-        t.dependsOn.map((dep) => {
-          const a = pos(dep);
-          const b = pos(t.id);
-          const x1 = a.x + nodeW;
-          const y1 = a.y + nodeH / 2;
-          const x2 = b.x;
-          const y2 = b.y + nodeH / 2;
-          const mx = (x1 + x2) / 2;
-          return <path key={`${dep}-${t.id}`} className="dag-edge" d={`M ${x1} ${y1} C ${mx} ${y1}, ${mx} ${y2}, ${x2} ${y2}`} fill="none" />;
-        }),
-      )}
-
-      {/* task nodes */}
-      {tasks.map((t) => {
-        const p = pos(t.id);
-        const st = status[t.id] ?? "pending";
-        const act = activity[t.id];
-        return (
-          <g key={t.id} transform={`translate(${p.x} ${p.y})`} className={`dag-node status-${st}`}>
-            <rect width={nodeW} height={nodeH} rx={8} />
-            <text className="dag-id" x={10} y={20}>{t.id}</text>
-            <text className="dag-status" x={10} y={38}>{st}</text>
-            {act && <text className="dag-act" x={10} y={54}>▸ {act}</text>}
-          </g>
-        );
-      })}
-    </svg>
+    <div className={`dag-canvas${editable ? " editable" : ""}`}>
+      <ReactFlow
+        nodes={nodes}
+        edges={edges}
+        nodeTypes={nodeTypes}
+        onNodesChange={noop}
+        onEdgesChange={noop}
+        fitView
+        minZoom={0.15}
+        nodesDraggable={false}
+        nodesConnectable={editable}
+        elementsSelectable={editable}
+        panOnScroll
+        zoomOnScroll={false}
+        zoomOnPinch
+        onNodeClick={(_, n) => onSelect?.(n.id)}
+        onConnect={(c) => c.source && c.target && onConnect?.(c.source, c.target)}
+        onEdgeClick={(_, e) => onDeleteEdge?.(e.source, e.target)}
+      >
+        <Background variant={BackgroundVariant.Dots} gap={20} size={1} />
+        <Controls showInteractive={false} />
+      </ReactFlow>
+      {editable && <div className="dag-hint">拖节点右侧手柄到另一个节点＝加依赖 · 点连线＝删依赖 · 点节点＝编辑 · 双指平移 · 捏合缩放</div>}
+    </div>
   );
 }
